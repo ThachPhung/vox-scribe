@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import sqlite_vec
 
+from core_app.database import voice_profiles
 from core_app.database.connection import write_transaction
 from core_app.database.models import (
     SQL_NOW,
@@ -374,14 +375,10 @@ def _get_speaker(connection: sqlite3.Connection, speaker_id: int) -> Speaker:
 def _save_voice_profile(
     connection: sqlite3.Connection, speaker_id: int, embedding: VoiceEmbedding
 ) -> None:
-    connection.execute(
-        f"""
-        INSERT INTO voice_profiles (speaker_id, model_version, embedding)
-        VALUES (?, ?, ?)
-        ON CONFLICT (speaker_id, model_version) DO UPDATE SET
-            embedding = excluded.embedding,
-            sample_count = sample_count + 1,
-            updated_at = {SQL_NOW}
-        """,
-        (speaker_id, embedding.model_version, sqlite_vec.serialize_float32(embedding.values)),
+    """Người dùng xác nhận: thêm 1 sample 'manual', tính lại hồ sơ (trung bình có trọng số,
+    không ghi đè) và bật lại tự học nếu speech_ai đã tạm dừng vì phát hiện lệch."""
+    voice_profiles.add_sample(
+        connection, speaker_id, embedding.model_version, embedding.values, source="manual"
     )
+    voice_profiles.recompute_profile(connection, speaker_id, embedding.model_version)
+    voice_profiles.set_auto_learn(connection, speaker_id, embedding.model_version, enabled=True)

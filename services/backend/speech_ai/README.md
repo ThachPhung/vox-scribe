@@ -76,3 +76,31 @@ cho biết trước số người (trước refine: 1/4 file khi tự đoán).
 - Model dấu câu dùng license CC-BY-SA-4.0: cần ghi nguồn (dragonSwing/vibert-capu) khi phát hành.
 - Danh bạ giọng là dữ liệu sinh trắc học: `data/` đã nằm trong `.gitignore`, không commit lên repo.
 - Lọc tiếng vọng mic hiện dựa trên đường bao năng lượng; nếu người dùng nói chồng lên loa thì vẫn giữ.
+
+## Dùng chung DB với core_app + tự học giọng
+
+```bash
+python -m speech_ai.pipeline_runner meeting.wav --db <VOXSCRIBE_DATA_DIR>/voxscribe.db --meeting-id <id> --mic-name "Thạch"
+```
+
+- `--db`: so khớp tên từ bảng `voice_profiles` (thay cho `--voicebook` JSON) -> tên ra luôn có trong
+  bảng `speakers`, core_app gán được ngay. Tự học bật mặc định, tắt bằng `--no-learn`.
+- Schema v3 (`core_app/database/models.py`): bảng `voice_samples` lưu từng sample (`auto` / `manual`,
+  `active` / `suspect`); `voice_profiles.embedding` = trung bình có trọng số các sample `active`
+  (sample `manual` nặng gấp đôi, tối thiểu 30s). `/speakers/confirm` thêm sample `manual` thay vì ghi đè.
+
+Luật tự học (`speech_ai/voice_learning.py`, `LearningPolicy`):
+
+| Luật | Mặc định | Cờ CLI |
+|---|---|---|
+| Ngưỡng sàn số giây nói trong cuộc họp | 30s | `--min-learn-sec` |
+| Sample tối đa / người / cuộc họp (mỗi sample ≥ 30s) | 2 | `--max-learn-samples` |
+| Điểm khớp tối thiểu để tự ghi | 0.70 | |
+| Người mới (< 5 sample) | 0.78 | |
+| Phải hơn người giống thứ 2 | ≥ 0.10 | |
+| Kiểm tra lệch | mỗi 5 cuộc họp có tự học | |
+| Lệch khi | sample gần đây giống mỏ neo < 0.65 hoặc độ phân tán > 0.10 | |
+
+Bị lệch -> sample tự học đáng ngờ chuyển `suspect` (không tính vào hồ sơ), **tạm dừng tự học**;
+người dùng `/speakers/confirm` lại người đó -> thêm sample `manual` và bật lại tự học.
+Người chưa có trong danh bạ không được tự tạo (không biết tên) -> cần `/speakers/confirm`.
