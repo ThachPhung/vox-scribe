@@ -113,6 +113,11 @@ def _system_branch(
     if not cfg.diarize:
         return [(UNKNOWN, c) for c in vad.segment(audio)], {}
     t = time.perf_counter()
+    # Kênh không có giọng nói (im lặng / nhạc / tiếng bíp thử loa) -> khỏi chạy diarization
+    if not vad.segment(audio):
+        timings["diarize"] = round(time.perf_counter() - t, 2)
+        timings[f"{channel}_no_speech"] = 1
+        return [], {}
     res = Diarizer(
         DiarizerConfig(
             num_speakers=cfg.num_speakers,
