@@ -11,3 +11,4 @@ models/
 src-tauri/target/
 .DS_Store
 services/backend/samples/
+services/backend/out*.json
