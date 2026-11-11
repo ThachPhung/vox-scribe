@@ -13,8 +13,8 @@ File mono: cả file đi theo nhánh Kênh Phải (SPEAKER_01, 02...).
 Đầu ra theo shared/schemas/transcript_contract.json.
 
 Chạy thử (từ thư mục services/backend):
-    python -m speech_ai.pipeline_runner samples/meeting.wav -o out.json
-    python -m speech_ai.pipeline_runner meeting_stereo.wav --voicebook data/voicebook.json --mic-name "Thạch"
+    python -m speech_ai.pipeline_runner samples/meeting_vi.wav -o out.json
+    python -m speech_ai.pipeline_runner samples/meeting_stereo.wav --voicebook data/voicebook.json --mic-name "Thạch"
 """
 from __future__ import annotations
 
@@ -74,25 +74,28 @@ class _Speaker:
 
 
 # ------------------------------------------------------------------ helpers
-def _frame_rms(x: np.ndarray, frame: int = 320) -> np.ndarray:  # 20ms
+def _frame_rms(x: np.ndarray, frame: int = 160) -> np.ndarray:  # 10ms
     n = len(x) // frame
     return np.sqrt((x[: n * frame].reshape(n, frame) ** 2).mean(1) + 1e-10) if n else np.zeros(0)
 
 
-def _is_bleed(mic: np.ndarray, sys: np.ndarray) -> bool:
+def _is_bleed(mic: np.ndarray, sys: np.ndarray, max_lag_frames: int = 15) -> bool:
     """Đoạn mic chỉ là tiếng loa vọng vào? (không đeo tai nghe)
 
-    Dấu hiệu: đường bao năng lượng (20ms) của mic gần như trùng với kênh loa
-    và kênh loa to hơn hẳn. Người dùng nói thật thì đường bao mic khác loa.
+    Dấu hiệu: đường bao năng lượng (10ms) của mic gần như trùng với kênh loa sau khi bù
+    độ trễ loa -> mic (0-150ms), và kênh loa to hơn hẳn. Người dùng nói thật thì khác loa.
     """
     em, es = _frame_rms(mic), _frame_rms(sys)
-    if len(em) < 10 or es.mean() < 1e-3:
+    if len(em) < 20 or es.mean() < 1e-3 or es.mean() < 1.5 * em.mean():
         return False
     lm, ls = np.log(em), np.log(es)
-    if lm.std() < 1e-6 or ls.std() < 1e-6:
-        return False
-    corr = float(np.corrcoef(lm, ls)[0, 1])
-    return corr > 0.8 and es.mean() > 1.5 * em.mean()
+    best = -1.0
+    for lag in range(0, min(max_lag_frames, len(lm) - 10) + 1):  # mic[t] ~ loa[t - lag]
+        a, b = lm[lag:], ls[: len(ls) - lag]
+        if a.std() < 1e-6 or b.std() < 1e-6:
+            continue
+        best = max(best, float(np.corrcoef(a, b)[0, 1]))
+    return best > 0.8
 
 
 def _split_long(audio: np.ndarray, start: float, end: float, vad: VadSegmenter, max_sec: float) -> list[AudioChunk]:
