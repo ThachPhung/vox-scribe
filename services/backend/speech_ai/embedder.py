@@ -23,12 +23,19 @@ MODELS = {
     "wespeaker": "wespeaker_en_voxceleb_resnet34_LM.onnx",  # 256 chiều, không tải mặc định
 }
 DEFAULT_MODEL = "campplus"
+# Dưới mức này (RMS ≈ -60 dBFS) coi như im lặng: CAM++ vẫn trả vector cho im lặng,
+# và mọi đoạn im lặng sẽ giống hệt nhau (cosine ~1.0) -> không được dùng làm vân tay.
+MIN_RMS = 1e-3
 
 
 def l2_normalize(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, np.float32)
     n = np.linalg.norm(v, axis=-1, keepdims=True)
     return v / np.maximum(n, 1e-12)
+
+
+def _rms(x: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(x, dtype=np.float64)))) if len(x) else 0.0
 
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -60,15 +67,17 @@ class Embedder:
         self.window = int(max_window_sec * SAMPLE_RATE)
 
     def embed(self, audio: np.ndarray) -> np.ndarray | None:
-        """Vector đã chuẩn hoá của 1 đoạn âm thanh. Đoạn quá ngắn (< min_sec) trả về None.
+        """Vector đã chuẩn hoá của 1 đoạn âm thanh.
 
-        Đoạn dài được chia cửa sổ `max_window_sec` rồi lấy trung bình (theo độ dài).
+        Trả về None nếu đoạn quá ngắn (< min_sec) hoặc gần như im lặng (RMS < MIN_RMS).
+        Đoạn dài được chia cửa sổ `max_window_sec` rồi lấy trung bình (theo độ dài);
+        các cửa sổ im lặng bị bỏ qua.
         """
         audio = np.asarray(audio, np.float32)
-        if len(audio) < self.min_samples:
+        if len(audio) < self.min_samples or _rms(audio) < MIN_RMS:
             return None
         parts = [audio[i : i + self.window] for i in range(0, len(audio), self.window)]
-        parts = [p for p in parts if len(p) >= self.min_samples] or [audio]
+        parts = [p for p in parts if len(p) >= self.min_samples and _rms(p) >= MIN_RMS] or [audio]
         vecs = np.stack([self._embed_one(p) for p in parts])
         weights = np.array([len(p) for p in parts], np.float32)
         return l2_normalize((vecs * weights[:, None]).sum(0))
