@@ -9,6 +9,7 @@ Không dùng PyTorch, không cần Hugging Face token. Toàn bộ chạy bằng 
 | Embedding giọng | WeSpeaker ResNet34-LM (ONNX) | 26 MB |
 | STT tiếng Việt (mặc định) | Zipformer-vi int8 (2025-04-20) | 60 MB |
 | STT dự phòng | faster-whisper int8 (`--backend whisper`) | tuỳ cỡ |
+| Dấu câu + viết hoa | ViBERT-capu int8 (`welcomyou/vibert-capu-onnx`, CC-BY-SA-4.0) | 116 MB |
 
 ## Cài đặt (Python 3.11)
 
@@ -31,9 +32,12 @@ python -m speech_ai.pipeline_runner samples/meeting.wav -o out.json --num-speake
 - `--channel left|right`: chỉ lấy kênh Mic / Loa từ file stereo của audio_engine.
 - `--backend whisper --whisper-model small`: dùng faster-whisper (có dấu câu, chậm hơn).
 - `--words`: kèm timestamp từng từ.
+- `--no-punct`: tắt bước thêm dấu câu / viết hoa.
 
 Đầu ra theo `shared/schemas/transcript_contract.json`.
 
 ## Lưu ý
 
-- Zipformer-vi trả chữ không dấu câu; pipeline chuẩn hoá về chữ thường + viết hoa đầu đoạn.
+- Zipformer-vi trả chữ IN HOA không dấu câu; `punctuator.py` (ViBERT-capu) thêm `, . ? :` và viết hoa
+  tên riêng. Timestamp từng từ (`words`) vẫn giữ dạng chữ thường gốc từ STT.
+- Model dấu câu dùng license CC-BY-SA-4.0: cần ghi nguồn (dragonSwing/vibert-capu) khi phát hành.

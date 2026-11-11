@@ -4,7 +4,8 @@
           ├─► [diarize] sherpa-onnx (pyannote-seg-3.0 + WeSpeaker) ─► các lượt nói SPEAKER_xx
           │        └─► lượt dài > max_sec được Silero VAD cắt nhỏ
           └─► [không diarize] Silero VAD ─► các đoạn có tiếng nói
-    các đoạn ─► STT (Zipformer-vi int8 | faster-whisper int8) ─► JSON
+    các đoạn ─► STT (Zipformer-vi int8 | faster-whisper int8)
+            ─► thêm dấu câu + viết hoa (ViBERT-capu ONNX) ─► JSON
 
 Đầu ra theo shared/schemas/transcript_contract.json.
 
@@ -23,6 +24,7 @@ import numpy as np
 
 from .audio_chunker import SAMPLE_RATE, AudioChunk, Channel, VadSegmenter, load_audio, split_fixed
 from .diarizer import Diarizer, DiarizerConfig, merge_turns
+from .punctuator import Punctuator
 from .transcriber import DEFAULT_MODELS_DIR, Utterance, create_transcriber
 
 UNKNOWN = "SPEAKER_UNKNOWN"
@@ -41,6 +43,7 @@ class PipelineConfig:
     batch_size: int = 16
     num_threads: int | None = None
     include_words: bool = False
+    punctuate: bool = True  # backend whisper đã có dấu câu sẵn -> bỏ qua
 
 
 @dataclass
@@ -128,6 +131,13 @@ def run_pipeline(
         items += [(spk, u) for (spk, _), u in zip(batch, utts)]
     timings["transcribe"] = round(time.perf_counter() - t, 2)
 
+    if cfg.punctuate and cfg.backend == "sherpa" and items:
+        t = time.perf_counter()
+        texts = Punctuator(num_threads=cfg.num_threads).punctuate_many([u.text for _, u in items])
+        for (_, u), text in zip(items, texts):
+            u.text = text
+        timings["punctuate"] = round(time.perf_counter() - t, 2)
+
     timings["total"] = round(time.perf_counter() - t0, 2)
     timings["rtf"] = round(timings["total"] / max(timings["audio_sec"], 1e-6), 3)  # < 1 là nhanh hơn thời gian thực
     meeting_id = meeting_id or Path(audio_path).stem
@@ -149,6 +159,7 @@ def main() -> None:
     p.add_argument("--max-segment", type=float, default=20.0, help="Độ dài tối đa 1 đoạn đưa vào STT (giây)")
     p.add_argument("--threads", type=int)
     p.add_argument("--words", action="store_true", help="Kèm timestamp từng từ trong JSON")
+    p.add_argument("--no-punct", action="store_true", help="Không thêm dấu câu / viết hoa")
     a = p.parse_args()
 
     cfg = PipelineConfig(
@@ -161,6 +172,7 @@ def main() -> None:
         max_segment_sec=a.max_segment,
         num_threads=a.threads,
         include_words=a.words,
+        punctuate=not a.no_punct,
     )
     res = run_pipeline(a.audio, a.meeting_id, a.channel, cfg)
 

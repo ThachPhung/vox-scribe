@@ -1,7 +1,7 @@
 """Script tải sẵn model AI về máy trong lần cài đầu tiên.
 
-Tất cả model ONNX lấy từ GitHub release chính thức của k2-fsa/sherpa-onnx
-(không cần Hugging Face token).
+Model ONNX lấy từ GitHub release chính thức của k2-fsa/sherpa-onnx và từ
+Hugging Face (repo công khai, không cần token, ghim theo commit + kiểm SHA256).
 
     python scripts/download_models.py               # tải bộ mặc định
     python scripts/download_models.py --whisper small  # tải thêm faster-whisper (int8)
@@ -11,6 +11,7 @@ Model được lưu vào services/backend/models/ (đã có trong .gitignore).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import sys
 import tarfile
@@ -42,6 +43,40 @@ MODELS = {
     # VAD lọc khoảng lặng, ~0.6MB
     "silero_vad.onnx": (f"{GH}/asr-models/silero_vad.onnx", "file"),
 }
+
+
+# Model dấu câu + viết hoa tiếng Việt (ViBERT-capu, CC-BY-SA-4.0), ~116MB
+HF_REPO = "welcomyou/vibert-capu-onnx"
+HF_REV = "a7754d037f4a9e29f7f3224f27acb60149eab874"
+HF_FILES = {
+    "vibert-capu.int8.onnx": "67278b23502bbd744538e2bd9a6748b61cce171cfba6c671c2e2a46f892166fa",
+    "vocab.txt": None,
+}
+PUNCT_DIR = "vibert-capu-onnx"
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def fetch_punctuator(force: bool = False) -> None:
+    target = MODELS_DIR / PUNCT_DIR
+    if target.exists() and all((target / f).exists() for f in HF_FILES) and not force:
+        print(f"✓ {PUNCT_DIR} (đã có)")
+        return
+    print(f"• {PUNCT_DIR}")
+    target.mkdir(parents=True, exist_ok=True)
+    for name, sha in HF_FILES.items():
+        tmp = target / f".{name}.part"
+        _download(f"https://huggingface.co/{HF_REPO}/resolve/{HF_REV}/{name}", tmp)
+        if sha and _sha256(tmp) != sha:
+            tmp.unlink()
+            raise RuntimeError(f"Sai checksum {name}")
+        tmp.replace(target / name)
 
 
 def _download(url: str, dst: Path) -> None:
@@ -97,6 +132,7 @@ def main() -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     for name, (url, kind) in MODELS.items():
         fetch(name, url, kind, a.force)
+    fetch_punctuator(a.force)
     if a.whisper:
         fetch_whisper(a.whisper)
     print(f"\nModel nằm tại: {MODELS_DIR}")
