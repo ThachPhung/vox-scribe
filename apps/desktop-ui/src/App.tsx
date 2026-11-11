@@ -1,18 +1,21 @@
 import { useCallback, useState } from "react";
+import HomeView from "./components/HomeView";
+import Icon from "./components/Icon";
 import MeetingDetail from "./components/MeetingDetail";
 import MeetingsList from "./components/MeetingsList";
 import RecorderBar from "./components/RecorderBar";
+import type { WaveformSample } from "./components/WaveformMeter";
 import { useAudioStream } from "./hooks/useAudioStream";
 import { useMeetings } from "./hooks/useMeetings";
-import type { WaveformSample } from "./components/WaveformMeter";
-import type { RecordingStatusData, WsEvent } from "./types";
+import { formatClock, useRecorder, type LiveStatus } from "./hooks/useRecorder";
+import type { WsEvent } from "./types";
 
-type View = { kind: "list" } | { kind: "detail"; meetingId: string };
+type View = { kind: "home" } | { kind: "detail"; meetingId: string };
 
 export default function App() {
-  const [view, setView] = useState<View>({ kind: "list" });
+  const [view, setView] = useState<View>({ kind: "home" });
   const [refreshKey, setRefreshKey] = useState(0);
-  const [status, setStatus] = useState<(RecordingStatusData & { meeting_id: string }) | null>(null);
+  const [status, setStatus] = useState<LiveStatus>(null);
   const [waveform, setWaveform] = useState<WaveformSample | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -28,8 +31,8 @@ export default function App() {
       case "app.detected":
         setNotice(
           event.data.app === "zoom"
-            ? "Phát hiện Zoom đang mở — bạn có thể bắt đầu ghi cuộc họp."
-            : "Phát hiện Microsoft Teams đang mở — bạn có thể bắt đầu ghi cuộc họp.",
+            ? "Zoom đang mở. Bạn có muốn ghi cuộc họp này?"
+            : "Microsoft Teams đang mở. Bạn có muốn ghi cuộc họp này?",
         );
         break;
       default:
@@ -40,49 +43,87 @@ export default function App() {
   const connected = useAudioStream(handleEvent);
   const { meetings, error, reload } = useMeetings(refreshKey);
 
-  const saved = useCallback(() => {
-    setRefreshKey((k) => k + 1);
-    reload();
-  }, [reload]);
+  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const recorder = useRecorder(status, {
+    onStarted: refresh,
+    onStopped: (meetingId) => {
+      refresh();
+      setView({ kind: "detail", meetingId });
+    },
+  });
+
+  const goHome = () => setView({ kind: "home" });
+  const selectedId = view.kind === "detail" ? view.meetingId : undefined;
 
   return (
     <div className="app">
-      <header className="app-header">
-        <span className="brand">VoxScribe</span>
-        <button
-          className={`nav-btn ${view.kind === "list" ? "active" : ""}`}
-          onClick={() => setView({ kind: "list" })}
-        >
-          Cuộc họp
-        </button>
-        <span className={`conn ${connected ? "on" : "off"}`}>
-          {connected ? "Đã kết nối backend" : "Chưa kết nối backend"}
-        </span>
-      </header>
-
-      {notice && (
-        <div className="notice" onClick={() => setNotice(null)}>
-          {notice} <b title="Đóng">×</b>
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-mark">
+            <Icon name="wave" size={16} />
+          </span>
+          VoxScribe
         </div>
-      )}
 
-      <main>
-        {view.kind === "list" ? (
-          <MeetingsList
-            meetings={meetings}
-            error={error}
-            onSelect={(meetingId) => setView({ kind: "detail", meetingId })}
-            onReload={reload}
-          />
+        <button
+          className={`new-btn ${recorder.active ? "live" : ""} ${view.kind === "home" ? "current" : ""}`}
+          onClick={goHome}
+        >
+          {recorder.active ? (
+            <>
+              <span className="rec-dot" /> Đang ghi · {formatClock(recorder.elapsed)}
+            </>
+          ) : (
+            <>
+              <Icon name="mic" size={16} /> Ghi cuộc họp mới
+            </>
+          )}
+        </button>
+
+        <MeetingsList
+          meetings={meetings}
+          error={error}
+          selectedId={selectedId}
+          onSelect={(meetingId) => setView({ kind: "detail", meetingId })}
+          onReload={reload}
+        />
+
+        <div className={`conn ${connected ? "on" : "off"}`} title="Kết nối tới backend FastAPI (localhost:8000)">
+          <span className="conn-dot" />
+          {connected ? "Đã kết nối backend" : "Chưa kết nối backend"}
+        </div>
+      </aside>
+
+      <main className="main">
+        {view.kind === "home" ? (
+          <HomeView recorder={recorder} waveform={waveform} connected={connected} />
         ) : (
-          <MeetingDetail
-            meetingId={view.meetingId}
-            onBack={() => setView({ kind: "list" })}
-          />
+          <MeetingDetail meetingId={view.meetingId} />
         )}
       </main>
 
-      <RecorderBar status={status} waveform={waveform} onSaved={saved} />
+      {view.kind !== "home" && <RecorderBar recorder={recorder} waveform={waveform} onOpen={goHome} />}
+
+      {notice && (
+        <div className="toast" role="status">
+          <Icon name="mic" size={16} />
+          <span>{notice}</span>
+          {!recorder.active && (
+            <button
+              className="btn btn-accent btn-sm"
+              onClick={() => {
+                setNotice(null);
+                goHome();
+              }}
+            >
+              Ghi ngay
+            </button>
+          )}
+          <button className="icon-btn" onClick={() => setNotice(null)} aria-label="Đóng thông báo">
+            <Icon name="x" size={15} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

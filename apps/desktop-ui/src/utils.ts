@@ -1,4 +1,4 @@
-// Định dạng thời gian dùng chung cho giao diện
+// Định dạng thời gian và tiện ích hiển thị dùng chung cho giao diện
 
 export function fmtDuration(totalSec: number | null): string {
   if (totalSec == null) return "—";
@@ -21,4 +21,28 @@ export function fmtDateTime(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+export function fmtTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+}
+
+export function fmtDay(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+/** Nhóm theo ngày cho danh sách bên trái: Hôm nay / Hôm qua / 7 ngày qua / Trước đó. */
+export function dayGroup(iso: string, now = new Date()): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "Khác";
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOfDay(now) - startOfDay(d)) / 86_400_000);
+  if (days <= 0) return "Hôm nay";
+  if (days === 1) return "Hôm qua";
+  if (days < 7) return "7 ngày qua";
+  return "Trước đó";
 }

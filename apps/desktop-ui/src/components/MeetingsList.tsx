@@ -1,6 +1,8 @@
-// Danh sách cuộc họp, bấm một dòng để mở chi tiết.
-import { fmtDateTime, fmtDuration } from "../utils";
+// Danh sách cuộc họp ở thanh bên, nhóm theo ngày, có ô tìm kiếm.
+import { useMemo, useState } from "react";
 import type { Meeting } from "../types";
+import { dayGroup, fmtDay, fmtDuration, fmtTime } from "../utils";
+import Icon from "./Icon";
 
 interface Props {
   meetings: Meeting[];
@@ -11,50 +13,71 @@ interface Props {
 }
 
 export default function MeetingsList({ meetings, error, selectedId, onSelect, onReload }: Props) {
+  const [query, setQuery] = useState("");
+
+  const groups = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const map = new Map<string, Meeting[]>();
+    for (const m of meetings) {
+      if (q && !m.title.toLowerCase().includes(q)) continue;
+      const key = dayGroup(m.started_at);
+      map.set(key, [...(map.get(key) ?? []), m]);
+    }
+    return [...map.entries()];
+  }, [meetings, query]);
+
   return (
-    <section className="meetings-list">
-      <div className="section-head">
-        <h2>Danh sách cuộc họp</h2>
-        <button className="ghost" onClick={onReload}>
-          Làm mới
+    <nav className="meetings-list" aria-label="Danh sách cuộc họp">
+      <div className="search">
+        <Icon name="search" size={15} />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Tìm cuộc họp"
+          aria-label="Tìm cuộc họp"
+        />
+      </div>
+
+      <div className="list-head">
+        <span>Cuộc họp</span>
+        <button className="icon-btn" onClick={onReload} title="Làm mới" aria-label="Làm mới danh sách">
+          <Icon name="refresh" size={15} />
         </button>
       </div>
 
-      {error && <p className="error-text">Không tải được danh sách: {error}</p>}
-      {!error && meetings.length === 0 && (
-        <p className="empty">Chưa có cuộc họp nào. Bấm “Bắt đầu ghi” ở thanh dưới.</p>
-      )}
+      <div className="list-scroll">
+        {error && <p className="list-note error">Không tải được danh sách: {error}</p>}
+        {!error && meetings.length === 0 && <p className="list-note">Chưa có cuộc họp nào.</p>}
+        {!error && meetings.length > 0 && groups.length === 0 && (
+          <p className="list-note">Không có cuộc họp khớp “{query}”.</p>
+        )}
 
-      {meetings.length > 0 && (
-        <table className="meetings-table">
-          <thead>
-            <tr>
-              <th>Tên cuộc họp</th>
-              <th>Thời gian</th>
-              <th>Dài</th>
-              <th>Trạng thái</th>
-            </tr>
-          </thead>
-          <tbody>
-            {meetings.map((m) => (
-              <tr
-                key={m.id}
-                className={m.id === selectedId ? "selected" : ""}
-                onClick={() => onSelect(m.id)}
-              >
-                <td>{m.title}</td>
-                <td>{fmtDateTime(m.started_at)}</td>
-                <td>{fmtDuration(m.duration_sec)}</td>
-                <td>
-                  <span className={`badge ${m.status}`}>
-                    {m.status === "recording" ? "Đang ghi" : "Đã ghi"}
+        {groups.map(([group, items]) => {
+          const recent = group === "Hôm nay" || group === "Hôm qua";
+          return (
+            <div key={group} className="list-group">
+              <div className="group-label">{group}</div>
+              {items.map((m) => (
+                <button
+                  key={m.id}
+                  className={`meeting-item ${m.id === selectedId ? "selected" : ""}`}
+                  onClick={() => onSelect(m.id)}
+                  aria-current={m.id === selectedId ? "page" : undefined}
+                >
+                  <span className="meeting-title">
+                    {m.status === "recording" && <span className="rec-dot" title="Đang ghi" />}
+                    {m.title}
                   </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </section>
+                  <span className="meeting-meta">
+                    {recent ? fmtTime(m.started_at) : fmtDay(m.started_at)} ·{" "}
+                    {m.status === "recording" ? "Đang ghi" : fmtDuration(m.duration_sec)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </nav>
   );
 }
