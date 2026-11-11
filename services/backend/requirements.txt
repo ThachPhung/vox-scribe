@@ -5,7 +5,8 @@ numpy
 soundfile
 pyaudiowpatch; sys_platform == "win32"
 psutil
-whisperx
-pyannote.audio
+# speech_ai: STT + diarization bằng C++/ONNX (không cần PyTorch)
+sherpa-onnx
+faster-whisper
 sqlite-vec
 python-docx
