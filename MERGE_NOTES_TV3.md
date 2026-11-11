@@ -48,10 +48,10 @@ Xem `services/backend/.env.example`:
 - `VOXSCRIBE_DATA_DIR`: thư mục chứa DB. Mặc định là `%LOCALAPPDATA%\VoxScribe`.
 
 ## Điểm cần chú ý khi merge
-- **`services/backend/requirements.txt` sẽ xung đột với nhánh `thachpv-dev` của TV2**, vì nhánh đó cũng sửa file này.
-  - Bản của TV3 bỏ `whisperx` và `pyannote.audio` khỏi bộ phát hành, thêm `httpx`, `onnxruntime`, `openai`.
-  - `sherpa-onnx` và `faster-whisper` được chuyển sang `requirements-offline.txt`.
-  - Khi giải quyết xung đột, giữ cách tách này.
+- **`services/backend/requirements.txt`:** xung đột với PR #1 của TV2 đã được giải quyết bằng commit merge `origin/dev` ngay trong nhánh này.
+  - `requirements.txt` là bộ phát hành Hybrid: có `httpx`, `onnxruntime`, `openai`; không có `whisperx` hay `pyannote.audio`.
+  - `requirements-offline.txt` chứa `sherpa-onnx`, `faster-whisper` và `tokenizers`. Đây là các thư viện cho STT offline và bộ thêm dấu câu của TV2 (bản Hybrid dùng Deepgram nên không cần chúng).
+  - TV2 cần cài `-r requirements-offline.txt` để chạy pipeline sherpa-onnx.
 - **CORS** giờ chỉ cho phép `http://localhost:5173`, `http://127.0.0.1:5173`, `http://tauri.localhost` và `tauri://localhost`. Cần TV1 xác nhận origin của Tauri.
 - DB là file SQLite, được tạo hoặc nâng cấp lúc server khởi động.
   - Schema hiện tại là v2.
