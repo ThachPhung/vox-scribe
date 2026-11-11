@@ -90,9 +90,10 @@ def _record(pa: pyaudio.PyAudio, args: argparse.Namespace) -> None:
     print(f"Right (system): {loopback.device.name} @ {loopback.sample_rate} Hz")
     print("Recording... Ctrl+C to stop" if args.duration is None else f"Recording {args.duration:g} s...")
 
+    started = time.perf_counter()
     recorder.start()
     try:
-        deadline = None if args.duration is None else time.perf_counter() + args.duration
+        deadline = None if args.duration is None else started + args.duration
         while deadline is None or time.perf_counter() < deadline:
             time.sleep(0.1)
     except KeyboardInterrupt:
