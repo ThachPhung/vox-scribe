@@ -13,23 +13,57 @@ Không dùng PyTorch, không cần Hugging Face token. Toàn bộ chạy bằng 
 
 ## Cài đặt (Python 3.11)
 
+Cần `ffmpeg` trong PATH (Windows: `winget install ffmpeg`, macOS: `brew install ffmpeg`).
+
 ```bash
 cd services/backend
-uv venv --python 3.11 .venv && source .venv/bin/activate
-uv pip install sherpa-onnx faster-whisper numpy soundfile
-python ../../scripts/download_models.py
+uv venv --python 3.11 .venv
 ```
 
-Cần `ffmpeg` trong PATH.
+Kích hoạt venv: macOS/Linux `source .venv/bin/activate`, Windows `.venv\Scripts\activate`.
+Không có `uv` thì dùng `py -3.11 -m venv .venv` (Windows) / `python3.11 -m venv .venv`, rồi `pip install` thay cho `uv pip install`.
+
+```bash
+uv pip install -r requirements-offline.txt
+python ../../scripts/download_models.py
+python ../../scripts/make_samples.py
+```
+
+- `download_models.py`: tải ~240 MB model ONNX vào `models/` (chỉ lần đầu).
+- `make_samples.py`: tạo file thử vào `samples/` từ các đoạn giọng người thật công khai
+  (repo không chứa file `.wav`).
 
 ## Chạy thử
 
+Chạy trong `services/backend`, venv đã kích hoạt. Copy nguyên lệnh:
+
 ```bash
-# File mono
-python -m speech_ai.pipeline_runner samples/meeting.wav -o out.json --words
-# File stereo của audio_engine (Trái = Mic, Phải = Loa) + gán tên từ danh bạ
-python -m speech_ai.pipeline_runner meeting_stereo.wav -o out.json --voicebook data/voicebook.json --mic-name "Thạch"
+python -m speech_ai.pipeline_runner samples/meeting_vi.wav -o out_vi.json --words
 ```
+
+Mono, 4 người nói tiếng Việt: ra 4 nhãn `SPEAKER_01..04`, chữ có dấu câu, kèm timestamp từng từ.
+
+```bash
+python -m speech_ai.pipeline_runner samples/meeting_stereo.wav -o out_stereo.json
+```
+
+Stereo như file của audio_engine (Trái = Mic, Phải = Loa): Mic -> `SPEAKER_00`, 2 người phía loa ->
+`SPEAKER_01`, `SPEAKER_02`; tiếng loa vọng vào mic bị lọc bỏ (`mic_bleed_dropped` trong dòng thời gian).
+
+Gán tên thật: enroll 2 người phía loa vào danh bạ rồi chạy lại.
+
+```bash
+python -m speech_ai.speaker_matcher enroll "Lôi Quân" samples/sr/leijun-sr-1.wav samples/sr/leijun-sr-2.wav
+python -m speech_ai.speaker_matcher enroll "Lưu Đức Hoa" samples/sr/liudehua-sr-1.wav samples/sr/liudehua-sr-2.wav
+python -m speech_ai.pipeline_runner samples/meeting_stereo.wav -o out_stereo.json --voicebook data/voicebook.json --mic-name "Thạch"
+```
+
+Kết quả: `speakers[]` có tên Thạch / Lôi Quân / Lưu Đức Hoa, điểm khớp ~0.8. Hai người phía loa nói
+tiếng Trung nên phần chữ của họ không có nghĩa; file này chỉ để thử tách và nhận diện người nói.
+
+Chạy với file của bạn: thay đường dẫn `samples/...` bằng file `.wav` / `.mp3` / `.m4a` bất kỳ.
+
+### Tuỳ chọn
 
 - `--channel auto` (mặc định): file 2 kênh -> chế độ stereo, 1 kênh -> mono. Có thể ép `mix|left|right|stereo`.
 - Stereo: Kênh Trái -> `SPEAKER_00` (người dùng máy), lọc bỏ tiếng loa vọng vào mic (`--keep-bleed` để tắt).
