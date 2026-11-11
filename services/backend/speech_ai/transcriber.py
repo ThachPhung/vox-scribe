@@ -14,6 +14,10 @@ import numpy as np
 
 from .audio_chunker import SAMPLE_RATE
 
+# Model align mặc định của WhisperX cho "vi" (wav2vec2-base-vi-vlsp2020) có kiến trúc riêng,
+# nạp vào Wav2Vec2ForCTC bị mất weight -> timestamp bị nén ~4 lần. Dùng model chuẩn thay thế.
+ALIGN_MODELS = {"vi": "nguyenvulebinh/wav2vec2-base-vietnamese-250h"}
+
 
 @dataclass
 class TranscriberConfig:
@@ -22,6 +26,7 @@ class TranscriberConfig:
     device: str = "cpu"  # faster-whisper chỉ hỗ trợ cpu / cuda (không có mps)
     compute_type: str = "int8"  # cuda: float16 ; cpu: int8
     batch_size: int = 8
+    align_model: str | None = None  # None = ALIGN_MODELS[lang] hoặc mặc định của WhisperX
 
 
 class Transcriber:
@@ -54,7 +59,9 @@ class Transcriber:
     def _align(self, segments: list[dict], audio: np.ndarray, language: str) -> dict:
         if self._align_lang != language:
             self._align_model, self._align_meta = self._wx.load_align_model(
-                language_code=language, device=self.cfg.device
+                language_code=language,
+                device=self.cfg.device,
+                model_name=self.cfg.align_model or ALIGN_MODELS.get(language),
             )
             self._align_lang = language
         return self._wx.align(

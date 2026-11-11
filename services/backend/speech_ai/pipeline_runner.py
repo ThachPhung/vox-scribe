@@ -88,6 +88,7 @@ def main() -> None:
     p.add_argument("--device", default="cpu", help="cpu | cuda (WhisperX)")
     p.add_argument("--compute-type", default=None, help="mặc định: cuda=float16, cpu=int8")
     p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--align-model", help="Tên model wav2vec2 trên HF để căn timestamp từng từ")
     p.add_argument("--diar-device", default=None, help="cpu | cuda | mps (mặc định = --device)")
     p.add_argument("--num-speakers", type=int)
     p.add_argument("--min-speakers", type=int)
@@ -101,6 +102,7 @@ def main() -> None:
         device=a.device,
         compute_type=a.compute_type or ("float16" if a.device == "cuda" else "int8"),
         batch_size=a.batch_size,
+        align_model=a.align_model,
     )
     dcfg = DiarizerConfig(
         device=a.diar_device or a.device,

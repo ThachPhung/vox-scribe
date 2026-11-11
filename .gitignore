@@ -10,3 +10,4 @@ venv/
 models/
 src-tauri/target/
 .DS_Store
+services/backend/samples/
