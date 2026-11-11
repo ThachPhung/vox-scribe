@@ -7,6 +7,7 @@ websockets
 httpx
 numpy
 soundfile
+soxr==1.1.0
 onnxruntime
 pyaudiowpatch; sys_platform == "win32"
 psutil
