@@ -146,7 +146,9 @@ class Punctuator:
         for _ in range(self.iterations):
             if not active:
                 break
-            labels = self._predict([cur[i] for i in active])
+            # Chạy từng câu (batch=1): model int8 lượng tử hoá động theo cả tensor,
+            # nên gộp lô làm kết quả câu này phụ thuộc câu khác -> không ổn định.
+            labels = [self._predict([cur[i]])[0] for i in active]
             still = []
             for i, lab in zip(active, labels):
                 if all(l in _SKIP for l in lab):

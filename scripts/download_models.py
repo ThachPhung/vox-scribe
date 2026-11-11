@@ -35,9 +35,9 @@ MODELS = {
         f"{GH}/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
         "tar",
     ),
-    # Vân tay giọng nói (embedding) dùng cho gom cụm người nói + speaker_matcher, ~26MB
-    "wespeaker_en_voxceleb_resnet34_LM.onnx": (
-        f"{GH}/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx",
+    # Vân tay giọng nói 192 chiều (3D-Speaker CAM++, zh+en), dùng cho diarization + embedder/speaker_matcher, ~28MB
+    "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx": (
+        f"{GH}/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
         "file",
     ),
     # VAD lọc khoảng lặng, ~0.6MB
