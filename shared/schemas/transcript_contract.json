@@ -1,11 +1,33 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "TranscriptContract",
-  "description": "Đầu ra của speech_ai (Người 2) -> đầu vào core_app (Người 3)",
+  "description": "Đầu ra của speech_ai (Người 2) -> đầu vào core_app (Người 3). Quy ước nhãn: SPEAKER_00 = người dùng Mic (Kênh Trái); SPEAKER_01, 02... = người ở Kênh Phải (Loa) hoặc file mono.",
   "type": "object",
   "properties": {
     "meeting_id": { "type": "string" },
-    "language": { "type": "string" },
+    "language": { "type": ["string", "null"] },
+    "speakers": {
+      "description": "Mỗi người nói xuất hiện trong cuộc họp, kèm vân tay giọng để enroll người lạ",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string", "description": "SPEAKER_xx, khớp với segments[].speaker_label" },
+          "channel": { "enum": ["mic", "system", "mono"] },
+          "speaker_id": { "type": ["string", "null"], "description": "ID trong danh bạ giọng nếu khớp" },
+          "name": { "type": ["string", "null"] },
+          "match_score": { "type": ["number", "null"], "description": "Cosine với người khớp nhất (0-1)" },
+          "duration_sec": { "type": "number" },
+          "embedding_model": { "type": "string", "description": "Hiện tại: campplus" },
+          "embedding": {
+            "type": ["array", "null"],
+            "description": "Vector float32 192 chiều (CAM++), đã chuẩn hoá L2 -> cosine = tích vô hướng",
+            "items": { "type": "number" }
+          }
+        },
+        "required": ["label", "channel", "name", "embedding_model", "embedding"]
+      }
+    },
     "segments": {
       "type": "array",
       "items": {
@@ -15,7 +37,20 @@
           "end": { "type": "number" },
           "speaker_label": { "type": "string" },
           "speaker_name": { "type": ["string", "null"] },
-          "text": { "type": "string" }
+          "text": { "type": "string" },
+          "words": {
+            "type": "array",
+            "description": "Chỉ có khi chạy với --words",
+            "items": {
+              "type": "object",
+              "properties": {
+                "word": { "type": "string" },
+                "start": { "type": "number" },
+                "end": { "type": "number" }
+              },
+              "required": ["word", "start", "end"]
+            }
+          }
         },
         "required": ["start", "end", "speaker_label", "text"]
       }

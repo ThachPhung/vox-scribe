@@ -37,6 +37,15 @@ def load_audio(path: str, channel: Channel = "mix", sr: int = SAMPLE_RATE) -> np
     return np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
 
 
+def probe_channels(path: str) -> int:
+    """Số kênh của file (1 = mono, 2 = stereo Mic/Loa của audio_engine)."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels", "-of", "csv=p=0", path],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return int(out) if out.isdigit() else 1
+
+
 @dataclass
 class AudioChunk:
     start: float  # giây, trên timeline gốc
