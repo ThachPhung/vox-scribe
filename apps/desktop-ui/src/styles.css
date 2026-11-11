@@ -1,0 +1,359 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1d212b;
+  --border: #2a2f3a;
+  --text: #e6e8eb;
+  --muted: #8b93a7;
+  --accent: #4f8cff;
+  --green: #3ecf8e;
+  --red: #e5484d;
+  --amber: #f2a33c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Thanh trên */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--accent);
+}
+
+.nav-btn,
+.ghost,
+.tabs button,
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.nav-btn.active,
+.tabs button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.conn {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.conn.on::before {
+  content: "● ";
+  color: var(--green);
+}
+
+.conn.off::before {
+  content: "● ";
+  color: var(--red);
+}
+
+/* Thông báo phát hiện Zoom/Teams */
+.notice {
+  background: rgba(242, 163, 60, 0.12);
+  border-bottom: 1px solid var(--amber);
+  color: var(--amber);
+  padding: 8px 20px;
+  cursor: pointer;
+}
+
+.notice b {
+  float: right;
+}
+
+main {
+  flex: 1;
+  padding: 20px;
+  max-width: 1080px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.section-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.empty,
+.error-text {
+  color: var(--muted);
+}
+
+.error-text {
+  color: var(--red);
+}
+
+/* Danh sách cuộc họp */
+.meetings-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.meetings-table th,
+.meetings-table td {
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.meetings-table th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.meetings-table tbody tr {
+  cursor: pointer;
+}
+
+.meetings-table tbody tr:hover,
+.meetings-table tbody tr.selected {
+  background: var(--panel-2);
+}
+
+.badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+
+.badge.recording {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.badge.recorded {
+  color: var(--green);
+  border-color: var(--green);
+}
+
+.badge.stale {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+/* Chi tiết cuộc họp */
+.detail-meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.transcript {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.transcript li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.transcript li:hover,
+.transcript li.selected {
+  border-color: var(--accent);
+}
+
+.transcript .ts {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
+}
+
+.transcript .speaker {
+  color: var(--accent);
+  font-weight: 600;
+  min-width: 96px;
+}
+
+/* Biên bản */
+.report-meta {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.report-warnings {
+  color: var(--amber);
+  padding-left: 18px;
+}
+
+.report-section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+
+.report-section h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.report-section ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.action-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.action-table th,
+.action-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.action-table th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.report-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Thanh ghi âm */
+.recorder-bar {
+  position: sticky;
+  bottom: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 10px 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recorder-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.title-input,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+
+.title-input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.record-btn {
+  font-weight: 600;
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.record-btn.recording {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  min-width: 56px;
+  text-align: right;
+  color: var(--muted);
+}
+
+.waveform {
+  width: 100%;
+  height: 72px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.recorder-error {
+  color: var(--red);
+  font-size: 13px;
+}

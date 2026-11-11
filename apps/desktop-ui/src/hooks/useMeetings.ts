@@ -1,11 +1,23 @@
-// Gọi REST API lấy lịch sử và báo cáo
-import { useEffect, useState } from "react";
+// Gọi REST API lấy lịch sử cuộc họp
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../services/apiClient";
+import type { Meeting } from "../types";
 
-export function useMeetings() {
-  const [meetings, setMeetings] = useState<unknown[]>([]);
-  useEffect(() => {
-    api.get("/meetings").then(setMeetings).catch(console.error);
+export function useMeetings(refreshKey = 0) {
+  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const reload = useCallback(() => {
+    api
+      .get<Meeting[]>("/meetings")
+      .then((data) => {
+        setMeetings(data);
+        setError(null);
+      })
+      .catch((e: Error) => setError(e.message));
   }, []);
-  return meetings;
+
+  useEffect(reload, [reload, refreshKey]);
+
+  return { meetings, error, reload };
 }
