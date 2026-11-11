@@ -1,0 +1,3 @@
+-r requirements.txt
+sherpa-onnx
+faster-whisper

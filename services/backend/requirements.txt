@@ -1,11 +1,13 @@
-fastapi
-uvicorn[standard]
+fastapi==0.162.4
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+sqlite-vec==0.1.9
+openai==3.49.0
 websockets
+httpx
 numpy
 soundfile
+onnxruntime
 pyaudiowpatch; sys_platform == "win32"
 psutil
-whisperx
-pyannote.audio
-sqlite-vec
 python-docx
