@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TranscriptContract",
+  "description": "Đầu ra của speech_ai (Người 2) -> đầu vào core_app (Người 3)",
+  "type": "object",
+  "properties": {
+    "meeting_id": { "type": "string" },
+    "language": { "type": "string" },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "start": { "type": "number" },
+          "end": { "type": "number" },
+          "speaker_label": { "type": "string" },
+          "speaker_name": { "type": ["string", "null"] },
+          "text": { "type": "string" }
+        },
+        "required": ["start", "end", "speaker_label", "text"]
+      }
+    }
+  },
+  "required": ["meeting_id", "segments"]
+}

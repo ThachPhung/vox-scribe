@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+websockets
+numpy
+soundfile
+pyaudiowpatch; sys_platform == "win32"
+psutil
+whisperx
+pyannote.audio
+sqlite-vec
+python-docx

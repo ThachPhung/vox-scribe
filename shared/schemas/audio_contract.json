@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AudioContract",
+  "description": "Đầu ra của audio_engine (Người 1) -> đầu vào speech_ai (Người 2)",
+  "type": "object",
+  "properties": {
+    "meeting_id": { "type": "string" },
+    "file_path": { "type": "string" },
+    "sample_rate": { "type": "integer" },
+    "channels": { "type": "integer", "description": "Trái = Mic, Phải = Loa" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "duration_sec": { "type": "number" }
+  },
+  "required": ["meeting_id", "file_path", "sample_rate", "channels"]
+}
