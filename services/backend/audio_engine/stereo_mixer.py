@@ -21,6 +21,7 @@ from .models import AudioChunk, ChannelStats, RecordingResult
 
 TARGET_RATE = 16_000
 CHANNELS = 2  # left = mic, right = system audio
+LEVEL_GAIN = 4.0  # RMS of normal speech (~0.05-0.2) -> visible meter level
 
 
 class ChunkSource(Protocol):
@@ -159,7 +160,18 @@ class StereoRecorder:
         self._aligners: tuple[ChannelAligner, ...] = ()
         self._pending = [np.zeros(0, np.float32) for _ in range(CHANNELS)]
         self._frames_written = 0
+        self._levels: tuple[float, float] = (0.0, 0.0)
         self._started_at: datetime | None = None
+
+    @property
+    def elapsed_sec(self) -> float:
+        """Seconds of audio written so far."""
+        return self._frames_written / TARGET_RATE
+
+    @property
+    def levels(self) -> tuple[float, float]:
+        """Meter level 0..1 (mic, system) of the most recently written block."""
+        return self._levels
 
     def start(self) -> None:
         if self._thread is not None:
@@ -234,8 +246,10 @@ class StereoRecorder:
     def _write(self, frames: int) -> None:
         if frames == 0:
             return
-        stereo = np.column_stack([p[:frames] for p in self._pending])
-        self._file.write(np.clip(stereo, -1.0, 1.0))
+        stereo = np.clip(np.column_stack([p[:frames] for p in self._pending]), -1.0, 1.0)
+        self._file.write(stereo)
+        rms = np.sqrt(np.mean(np.square(stereo), axis=0))
+        self._levels = tuple(float(min(1.0, v * LEVEL_GAIN)) for v in rms)
         self._pending = [p[frames:] for p in self._pending]
         self._frames_written += frames
 
