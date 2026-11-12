@@ -1,31 +1,38 @@
-"""Phát hiện Zoom hoặc Teams đang mở và phát sự kiện mở/đóng.
+"""Phát hiện Zoom, Teams hoặc Google Meet đang mở và phát sự kiện mở/đóng.
 
-Phát hiện theo tên tiến trình (psutil) để desktop hiện thông báo khi người dùng
-bắt đầu một cuộc họp. Google Meet chạy trong trình duyệt nên không có tiến trình
-riêng để theo dõi.
+Zoom/Teams nhận theo tên tiến trình (psutil). Google Meet chạy trong trình duyệt nên
+nhận theo tiêu đề cửa sổ (xem window_titles). Desktop dùng sự kiện để hiện thông báo
+khi người dùng bắt đầu một cuộc họp.
 """
 
 from __future__ import annotations
 
 import argparse
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Literal
 
 import psutil
 
-AppName = Literal["zoom", "teams"]
+from .window_titles import find_open_meet_calls
+
+AppName = Literal["zoom", "teams", "meet"]
 
 KNOWN_APPS: dict[str, tuple[str, ...]] = {
     "zoom": ("zoom.exe",),
     "teams": ("ms-teams.exe", "teams.exe"),
 }
+MEET_APP = "meet"
+
+
+def _list_processes() -> list[tuple[int, str]]:
+    return [(p.info["pid"], p.info["name"] or "") for p in psutil.process_iter(["pid", "name"])]
 
 
 @dataclass(frozen=True)
 class AppEvent:
-    """Một lần Zoom/Teams mở vào hoặc đóng đi."""
+    """Một lần Zoom/Teams/Meet mở vào hoặc đóng đi."""
 
     app: str
     running: bool
@@ -33,7 +40,7 @@ class AppEvent:
 
 
 class ProcessWatcher:
-    """Theo dõi tiến trình Zoom/Teams, chỉ trả về sự kiện khi có thay đổi.
+    """Theo dõi Zoom/Teams/Meet, chỉ trả về sự kiện khi có thay đổi.
 
     Quét tiến trình theo chu kỳ trên một thread nền:
 
@@ -43,22 +50,31 @@ class ProcessWatcher:
         watcher.stop()
     """
 
-    def __init__(self, *, interval_sec: float = 2.0) -> None:
+    def __init__(
+        self,
+        *,
+        interval_sec: float = 2.0,
+        process_lister: Callable[[], Iterable[tuple[int, str]]] = _list_processes,
+        meet_finder: Callable[[], tuple[int, ...]] = find_open_meet_calls,
+    ) -> None:
         self.interval_sec = interval_sec
         self._names = {app: {n.lower() for n in names} for app, names in KNOWN_APPS.items()}
+        self._list_processes = process_lister
+        self._find_meet = meet_finder
         self._baseline: dict[str, tuple[int, ...]] = {}
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
     def scan(self) -> dict[str, tuple[int, ...]]:
-        """Tên app -> pid của các tiến trình đang chạy, không phân biệt hoa thường."""
+        """Tên app -> pid đang chạy (tên tiến trình không phân biệt hoa thường)."""
         found: dict[str, list[int]] = {app: [] for app in self._names}
-        for proc in psutil.process_iter(["pid", "name"]):
-            name = (proc.info["name"] or "").lower()
+        for pid, raw_name in self._list_processes():
+            name = raw_name.lower()
             for app, names in self._names.items():
                 if name in names:
-                    found[app].append(proc.info["pid"])
-        return {app: tuple(sorted(pids)) for app, pids in found.items()}
+                    found[app].append(pid)
+        result = {app: tuple(sorted(pids)) for app, pids in found.items()}
+        return {**result, MEET_APP: self._find_meet()}
 
     def poll(self) -> list[AppEvent]:
         """So sánh với lần quét trước; lần đầu chỉ đặt mốc, không báo sự kiện."""
@@ -100,7 +116,7 @@ class ProcessWatcher:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m audio_engine.process_watcher",
-        description="In ra khi Zoom/Teams mở hoặc đóng (Ctrl+C để dừng).",
+        description="In ra khi Zoom/Teams/Meet mở hoặc đóng (Ctrl+C để dừng).",
     )
     parser.add_argument("-i", "--interval", type=float, default=2.0, help="giây giữa hai lần quét")
     args = parser.parse_args(argv)
@@ -110,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{event.app}: {state}")
 
     watcher = ProcessWatcher(interval_sec=args.interval)
-    print(f"Quét Zoom/Teams mỗi {args.interval:g} s. Ctrl+C để dừng.")
+    print(f"Quét Zoom/Teams/Meet mỗi {args.interval:g} s. Ctrl+C để dừng.")
     try:
         watcher.start(show)
         threading.Event().wait()
