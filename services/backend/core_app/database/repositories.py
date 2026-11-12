@@ -19,16 +19,12 @@ from core_app.database.models import (
     Segment,
     Speaker,
     SpeakerConfirmation,
-    SpeakerMatch,
     Transcript,
     TranscriptIn,
     TranscriptSegmentIn,
-    VoiceEmbedding,
+    VoiceprintSummary,
     normalize_person_name,
 )
-
-DEFAULT_MATCH_LIMIT = 3
-
 
 class NotFoundError(LookupError):
     pass
@@ -85,28 +81,30 @@ def finish_recording(connection: sqlite3.Connection, meeting_id: str) -> Meeting
 
 
 def save_transcript(connection: sqlite3.Connection, transcript: TranscriptIn) -> Transcript:
-    """Thay toàn bộ transcript và tăng số phiên bản; biên bản tạo từ phiên bản cũ trở thành stale.
+    """Thay toàn bộ transcript và tăng transcript_revision, nên biên bản cũ thành stale.
 
-    Tên do máy so khớp (speaker_name) chỉ ghi đè nhãn mà người dùng chưa xác nhận.
+    Nhãn SPEAKER_xx không ổn định giữa các lần chạy tách giọng, nên mọi xác nhận tên cũ của cuộc họp bị bỏ,
+    kể cả mẫu giọng đã học từ các xác nhận đó. Tên được gán lại theo kết quả so khớp danh bạ
+    (speakers[].name) mà speech_ai gửi kèm; người dùng xác nhận lại thì mẫu giọng được học lại.
     """
     meeting_id = transcript.meeting_id
-    names_by_label = _speaker_names_by_label(transcript.segments)
     with write_transaction(connection):
         bumped = connection.execute(
             "UPDATE meetings SET transcript_revision = transcript_revision + 1 WHERE id = ?", (meeting_id,)
         ).rowcount
         if bumped == 0:
             raise NotFoundError(f"Không tìm thấy cuộc họp {meeting_id}")
+        _forget_confirmed_voices(connection, meeting_id)
         connection.execute("DELETE FROM segments WHERE meeting_id = ?", (meeting_id,))
-        _remove_stale_labels(connection, meeting_id, set(names_by_label))
+        connection.execute("DELETE FROM meeting_speakers WHERE meeting_id = ?", (meeting_id,))
         connection.executemany(
             """
-            INSERT INTO meeting_speakers (meeting_id, speaker_label, speaker_id)
-            VALUES (?, ?, (SELECT id FROM speakers WHERE name = ?))
-            ON CONFLICT (meeting_id, speaker_label) DO UPDATE SET speaker_id = excluded.speaker_id
-            WHERE meeting_speakers.confirmed_at IS NULL
+            INSERT INTO meeting_speakers (meeting_id, speaker_label, speaker_id, match_score,
+                                          channel, duration_sec, embedding, embedding_model)
+            VALUES (:meeting_id, :label, :speaker_id, :match_score,
+                    :channel, :duration_sec, :embedding, :embedding_model)
             """,
-            [(meeting_id, label, name) for label, name in names_by_label.items()],
+            _meeting_speaker_rows(connection, transcript),
         )
         connection.executemany(
             "INSERT INTO segments (meeting_id, start_sec, end_sec, speaker_label, text, words_json)"
@@ -117,11 +115,9 @@ def save_transcript(connection: sqlite3.Connection, transcript: TranscriptIn) ->
 
 
 def get_transcript(connection: sqlite3.Connection, meeting_id: str) -> Transcript:
-    meeting = connection.execute(
-        "SELECT transcript_revision FROM meetings WHERE id = ?", (meeting_id,)
-    ).fetchone()
-    if meeting is None:
-        raise NotFoundError(f"Không tìm thấy cuộc họp {meeting_id}")
+    """Đọc revision trước các câu: nếu transcript bị thay giữa hai lệnh đọc thì kết quả mang revision cũ,
+    nên biên bản tạo từ nó bị từ chối hoặc thành stale chứ không bị coi nhầm là mới."""
+    revision = _current_transcript_revision(connection, meeting_id)
     rows = connection.execute(
         """
         SELECT s.id, s.start_sec, s.end_sec, s.speaker_label, sp.name AS speaker_name,
@@ -135,19 +131,16 @@ def get_transcript(connection: sqlite3.Connection, meeting_id: str) -> Transcrip
         """,
         (meeting_id,),
     ).fetchall()
-    return Transcript(
-        meeting_id=meeting_id,
-        revision=meeting["transcript_revision"],
-        segments=[_segment_from_row(row) for row in rows],
-    )
+    return Transcript(meeting_id=meeting_id, revision=revision, segments=[_segment_from_row(row) for row in rows])
 
 
 def list_meeting_speakers(connection: sqlite3.Connection, meeting_id: str) -> list[MeetingSpeaker]:
-    _require_meeting(connection, meeting_id)
+    _current_transcript_revision(connection, meeting_id)
     rows = connection.execute(
         """
-        SELECT ms.speaker_label, ms.speaker_id, sp.name AS speaker_name,
-               ms.match_score, ms.confirmed_at
+        SELECT ms.speaker_label, ms.speaker_id, sp.name AS speaker_name, ms.channel,
+               ms.duration_sec, ms.match_score, ms.embedding IS NOT NULL AS has_meeting_embedding,
+               ms.confirmed_at
         FROM meeting_speakers ms
         LEFT JOIN speakers sp ON sp.id = ms.speaker_id
         WHERE ms.meeting_id = ?
@@ -159,52 +152,66 @@ def list_meeting_speakers(connection: sqlite3.Connection, meeting_id: str) -> li
 
 
 def confirm_speaker(connection: sqlite3.Connection, confirmation: SpeakerConfirmation) -> bool:
-    """Gán tên thật cho một nhãn. Trả False khi xác nhận này đã được lưu trước đó."""
+    """Gán tên thật cho một nhãn. Trả False khi xác nhận này đã được lưu trước đó.
+
+    Vector của nhãn thành mẫu 'manual' của người được xác nhận; sửa nhãn sang người khác thì mẫu chuyển theo.
+    Xác nhận cũng bật lại tự học của speech_ai cho người đó. transcript_revision chỉ tăng khi tên hiển thị
+    của nhãn đổi, để xác nhận một tên máy đã gán đúng không làm biên bản thành stale.
+    """
+    label = (confirmation.meeting_id, confirmation.speaker_label)
     with write_transaction(connection):
         mapping = connection.execute(
-            "SELECT speaker_id, confirmed_at FROM meeting_speakers"
+            "SELECT speaker_id, confirmed_at, embedding_model FROM meeting_speakers"
             " WHERE meeting_id = ? AND speaker_label = ?",
-            (confirmation.meeting_id, confirmation.speaker_label),
+            label,
         ).fetchone()
         if mapping is None:
             raise NotFoundError(
                 f"Cuộc họp {confirmation.meeting_id} không có nhãn {confirmation.speaker_label}"
             )
         speaker_id = _get_or_create_speaker(connection, confirmation.name)
-        if mapping["confirmed_at"] is not None and mapping["speaker_id"] == speaker_id:
-            return False
-        if confirmation.embedding is not None:
-            _save_voice_profile(connection, speaker_id, confirmation.embedding)
-        connection.execute(
-            f"UPDATE meeting_speakers SET speaker_id = ?, confirmed_at = {SQL_NOW}"
-            " WHERE meeting_id = ? AND speaker_label = ?",
-            (speaker_id, confirmation.meeting_id, confirmation.speaker_label),
-        )
-    return True
+        name_changes = mapping["speaker_id"] != speaker_id
+        newly_confirmed = mapping["confirmed_at"] is None or name_changes
+        if newly_confirmed:
+            _move_voice_sample(connection, confirmation, speaker_id)
+            connection.execute(
+                f"UPDATE meeting_speakers SET speaker_id = ?, confirmed_at = {SQL_NOW}"
+                " WHERE meeting_id = ? AND speaker_label = ?",
+                (speaker_id, *label),
+            )
+        if name_changes:
+            connection.execute(
+                "UPDATE meetings SET transcript_revision = transcript_revision + 1 WHERE id = ?",
+                (confirmation.meeting_id,),
+            )
+        if mapping["embedding_model"] is not None:
+            voice_profiles.set_auto_learn(connection, speaker_id, mapping["embedding_model"], enabled=True)
+    return newly_confirmed
 
 
 def list_speakers(connection: sqlite3.Connection) -> list[Speaker]:
-    rows = connection.execute("SELECT * FROM speakers ORDER BY name").fetchall()
-    return [Speaker.model_validate(dict(row)) for row in rows]
+    return _load_speakers(connection, "", ())
 
 
 def rename_speaker(connection: sqlite3.Connection, speaker_id: int, name: str) -> Speaker:
-    try:
-        with write_transaction(connection):
-            updated = connection.execute(
-                f"UPDATE speakers SET name = ?, updated_at = {SQL_NOW} WHERE id = ?",
-                (normalize_person_name(name), speaker_id),
-            ).rowcount
-    except sqlite3.IntegrityError as error:
-        raise ConflictError(f"Đã có người tên {name} trong danh bạ") from error
-    if updated == 0:
-        raise NotFoundError(f"Không tìm thấy người nói {speaker_id}")
+    """Tên không được trùng người khác kể cả khi chỉ khác chữ hoa; các cuộc họp có người này thành stale."""
+    name = normalize_person_name(name)
+    with write_transaction(connection):
+        if connection.execute("SELECT 1 FROM speakers WHERE id = ?", (speaker_id,)).fetchone() is None:
+            raise NotFoundError(f"Không tìm thấy người nói {speaker_id}")
+        if _find_speaker_id_by_name(connection, name) not in (None, speaker_id):
+            raise ConflictError(f"Đã có người tên {name} trong danh bạ")
+        connection.execute(
+            f"UPDATE speakers SET name = ?, updated_at = {SQL_NOW} WHERE id = ?", (name, speaker_id)
+        )
+        _mark_meetings_of_speaker_changed(connection, speaker_id)
     return _get_speaker(connection, speaker_id)
 
 
 def delete_speaker(connection: sqlite3.Connection, speaker_id: int) -> None:
-    """Các nhãn từng gán cho người này trở về chưa xác nhận để có thể gán lại."""
+    """Xóa người, mẫu giọng và vân tay; các nhãn từng gán cho người này trở về chưa xác nhận."""
     with write_transaction(connection):
+        _mark_meetings_of_speaker_changed(connection, speaker_id)
         connection.execute(
             "UPDATE meeting_speakers SET confirmed_at = NULL WHERE speaker_id = ?", (speaker_id,)
         )
@@ -213,70 +220,25 @@ def delete_speaker(connection: sqlite3.Connection, speaker_id: int) -> None:
             raise NotFoundError(f"Không tìm thấy người nói {speaker_id}")
 
 
-def find_closest_speakers(
-    connection: sqlite3.Connection, embedding: VoiceEmbedding, limit: int = DEFAULT_MATCH_LIMIT
-) -> list[SpeakerMatch]:
-    """Chỉ so với vector của cùng phiên bản model."""
-    rows = connection.execute(
-        """
-        SELECT s.id AS speaker_id, s.name,
-               1 - vec_distance_cosine(v.embedding, ?) AS similarity
-        FROM voice_profiles v
-        JOIN speakers s ON s.id = v.speaker_id
-        WHERE v.model_version = ?
-        ORDER BY similarity DESC
-        LIMIT ?
-        """,
-        (sqlite_vec.serialize_float32(embedding.values), embedding.model_version, limit),
-    ).fetchall()
-    return [SpeakerMatch.model_validate(dict(row)) for row in rows]
-
-
-def save_report(connection: sqlite3.Connection, draft: ReportDraft, expected_revision: int | None) -> Report:
-    """Chỉ lưu khi transcript và biên bản hiện tại vẫn là bản mà draft được tạo từ đó.
-
-    expected_revision là revision của biên bản lúc bắt đầu (None nếu khi đó chưa có biên bản).
-    """
+def save_generated_report(
+    connection: sqlite3.Connection, draft: ReportDraft, expected_revision: int | None
+) -> Report:
+    """Biên bản do LLM tạo chỉ được lưu khi transcript (kể cả tên) không đổi trong lúc chờ LLM."""
     with write_transaction(connection):
-        meeting = connection.execute(
-            "SELECT transcript_revision FROM meetings WHERE id = ?", (draft.meeting_id,)
-        ).fetchone()
-        if meeting is None:
-            raise NotFoundError(f"Không tìm thấy cuộc họp {draft.meeting_id}")
-        if meeting["transcript_revision"] != draft.transcript_revision:
+        if _current_transcript_revision(connection, draft.meeting_id) != draft.transcript_revision:
             raise ConflictError("Transcript đã thay đổi trong lúc tạo biên bản, hãy tạo lại")
-        current = connection.execute(
-            "SELECT revision FROM reports WHERE meeting_id = ?", (draft.meeting_id,)
-        ).fetchone()
-        current_revision = current["revision"] if current is not None else None
-        if current_revision != expected_revision:
-            raise ConflictError("Biên bản vừa được sửa ở nơi khác, hãy tải lại rồi thử lại")
-        connection.execute(
-            f"""
-            INSERT INTO reports (meeting_id, content_json, warnings_json, source, llm_model,
-                                 prompt_version, transcript_revision, revision)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (meeting_id) DO UPDATE SET
-                content_json = excluded.content_json,
-                warnings_json = excluded.warnings_json,
-                source = excluded.source,
-                llm_model = excluded.llm_model,
-                prompt_version = excluded.prompt_version,
-                transcript_revision = excluded.transcript_revision,
-                revision = excluded.revision,
-                updated_at = {SQL_NOW}
-            """,
-            (
-                draft.meeting_id,
-                draft.content.model_dump_json(),
-                json.dumps(draft.warnings, ensure_ascii=False),
-                draft.source,
-                draft.llm_model,
-                draft.prompt_version,
-                draft.transcript_revision,
-                (current_revision or 0) + 1,
-            ),
-        )
+        _write_report(connection, draft, expected_revision)
+    return get_report(connection, draft.meeting_id)
+
+
+def save_edited_report(
+    connection: sqlite3.Connection, draft: ReportDraft, expected_revision: int | None
+) -> Report:
+    """Bản người dùng sửa giữ transcript_revision mà họ đã đối chiếu, nên biên bản cũ vẫn có thể stale."""
+    with write_transaction(connection):
+        if draft.transcript_revision > _current_transcript_revision(connection, draft.meeting_id):
+            raise ConflictError("Phiên bản transcript gửi lên không tồn tại")
+        _write_report(connection, draft, expected_revision)
     return get_report(connection, draft.meeting_id)
 
 
@@ -313,9 +275,96 @@ def get_report(connection: sqlite3.Connection, meeting_id: str) -> Report:
     return report
 
 
-def _require_meeting(connection: sqlite3.Connection, meeting_id: str) -> None:
-    if connection.execute("SELECT 1 FROM meetings WHERE id = ?", (meeting_id,)).fetchone() is None:
+def _current_transcript_revision(connection: sqlite3.Connection, meeting_id: str) -> int:
+    row = connection.execute("SELECT transcript_revision FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+    if row is None:
         raise NotFoundError(f"Không tìm thấy cuộc họp {meeting_id}")
+    return row["transcript_revision"]
+
+
+def _mark_meetings_of_speaker_changed(connection: sqlite3.Connection, speaker_id: int) -> None:
+    connection.execute(
+        "UPDATE meetings SET transcript_revision = transcript_revision + 1"
+        " WHERE id IN (SELECT meeting_id FROM meeting_speakers WHERE speaker_id = ?)",
+        (speaker_id,),
+    )
+
+
+def _write_report(connection: sqlite3.Connection, draft: ReportDraft, expected_revision: int | None) -> None:
+    """expected_revision là revision của biên bản mà người gửi đã đọc (None nếu khi đó chưa có biên bản)."""
+    current = connection.execute(
+        "SELECT revision FROM reports WHERE meeting_id = ?", (draft.meeting_id,)
+    ).fetchone()
+    current_revision = current["revision"] if current is not None else None
+    if current_revision != expected_revision:
+        raise ConflictError("Biên bản vừa được sửa ở nơi khác, hãy tải lại rồi thử lại")
+    connection.execute(
+        f"""
+        INSERT INTO reports (meeting_id, content_json, warnings_json, source, llm_model,
+                             prompt_version, transcript_revision, revision)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (meeting_id) DO UPDATE SET
+            content_json = excluded.content_json,
+            warnings_json = excluded.warnings_json,
+            source = excluded.source,
+            llm_model = excluded.llm_model,
+            prompt_version = excluded.prompt_version,
+            transcript_revision = excluded.transcript_revision,
+            revision = excluded.revision,
+            updated_at = {SQL_NOW}
+        """,
+        (
+            draft.meeting_id,
+            draft.content.model_dump_json(),
+            json.dumps(draft.warnings, ensure_ascii=False),
+            draft.source,
+            draft.llm_model,
+            draft.prompt_version,
+            draft.transcript_revision,
+            (current_revision or 0) + 1,
+        ),
+    )
+
+
+def _meeting_speaker_rows(connection: sqlite3.Connection, transcript: TranscriptIn) -> list[dict[str, object]]:
+    """Một dòng meeting_speakers cho mỗi nhãn xuất hiện trong segments hoặc speakers[].
+
+    Tên khớp được ưu tiên; speaker_id chỉ được dùng khi không có tên, vì id có thể đến từ danh bạ khác.
+    """
+    segment_names = _speaker_names_by_label(transcript.segments)
+    details = {speaker.label: speaker for speaker in transcript.speakers}
+    rows: list[dict[str, object]] = []
+    for label in dict.fromkeys([*segment_names, *details]):
+        speaker = details.get(label)
+        name = (_clean_name(speaker.name) if speaker else None) or segment_names.get(label)
+        rows.append({
+            "meeting_id": transcript.meeting_id,
+            "label": label,
+            "speaker_id": _resolve_speaker_id(connection, name, speaker.speaker_id if speaker else None),
+            "match_score": speaker.match_score if speaker else None,
+            "channel": speaker.channel if speaker else None,
+            "duration_sec": speaker.duration_sec if speaker else None,
+            "embedding": sqlite_vec.serialize_float32(speaker.embedding) if speaker and speaker.embedding else None,
+            "embedding_model": speaker.embedding_model if speaker else None,
+        })
+    return rows
+
+
+def _resolve_speaker_id(connection: sqlite3.Connection, name: str | None, book_id: str | None) -> int | None:
+    if name is not None:
+        return _find_speaker_id_by_name(connection, name)
+    parsed = _parse_book_id(book_id)
+    if parsed is None:
+        return None
+    row = connection.execute("SELECT id FROM speakers WHERE id = ?", (parsed,)).fetchone()
+    return row["id"] if row is not None else None
+
+
+def _parse_book_id(value: str | None) -> int | None:
+    """speaker_id của danh bạ là chuỗi chữ số ASCII; mọi dạng khác không phải id của DB này."""
+    if value is None or not (value.isascii() and value.isdigit()):
+        return None
+    return int(value)
 
 
 def _speaker_names_by_label(segments: list[TranscriptSegmentIn]) -> dict[str, str | None]:
@@ -330,16 +379,6 @@ def _clean_name(name: str | None) -> str | None:
     if name is None or not name.strip():
         return None
     return normalize_person_name(name)
-
-
-def _remove_stale_labels(connection: sqlite3.Connection, meeting_id: str, labels: set[str]) -> None:
-    existing = connection.execute(
-        "SELECT speaker_label FROM meeting_speakers WHERE meeting_id = ?", (meeting_id,)
-    ).fetchall()
-    stale = [(meeting_id, row["speaker_label"]) for row in existing if row["speaker_label"] not in labels]
-    connection.executemany(
-        "DELETE FROM meeting_speakers WHERE meeting_id = ? AND speaker_label = ?", stale
-    )
 
 
 def _segment_row(meeting_id: str, segment: TranscriptSegmentIn) -> tuple:
@@ -362,23 +401,104 @@ def _segment_from_row(row: sqlite3.Row) -> Segment:
     )
 
 
+def _find_speaker_id_by_name(connection: sqlite3.Connection, name: str) -> int | None:
+    """So tên không phân biệt hoa thường; tên trong DB luôn đã chuẩn hóa NFC."""
+    wanted = name.casefold()
+    for row in connection.execute("SELECT id, name FROM speakers"):
+        if row["name"].casefold() == wanted:
+            return row["id"]
+    return None
+
+
 def _get_or_create_speaker(connection: sqlite3.Connection, name: str) -> int:
-    connection.execute("INSERT INTO speakers (name) VALUES (?) ON CONFLICT (name) DO NOTHING", (name,))
-    return connection.execute("SELECT id FROM speakers WHERE name = ?", (name,)).fetchone()["id"]
+    existing = _find_speaker_id_by_name(connection, name)
+    if existing is not None:
+        return existing
+    return connection.execute("INSERT INTO speakers (name) VALUES (?)", (name,)).lastrowid
 
 
 def _get_speaker(connection: sqlite3.Connection, speaker_id: int) -> Speaker:
-    row = connection.execute("SELECT * FROM speakers WHERE id = ?", (speaker_id,)).fetchone()
-    return Speaker.model_validate(dict(row))
+    return _load_speakers(connection, "WHERE s.id = ?", (speaker_id,))[0]
 
 
-def _save_voice_profile(
-    connection: sqlite3.Connection, speaker_id: int, embedding: VoiceEmbedding
-) -> None:
-    """Người dùng xác nhận: thêm 1 sample 'manual', tính lại hồ sơ (trung bình có trọng số,
-    không ghi đè) và bật lại tự học nếu speech_ai đã tạm dừng vì phát hiện lệch."""
-    voice_profiles.add_sample(
-        connection, speaker_id, embedding.model_version, embedding.values, source="manual"
+def _load_speakers(connection: sqlite3.Connection, where: str, params: tuple) -> list[Speaker]:
+    """`where` là mệnh đề cố định trong module này (không nhận chuỗi từ bên ngoài), lọc theo bảng `s`."""
+    profiles: dict[int, list[VoiceprintSummary]] = {}
+    for row in connection.execute(
+        "SELECT v.speaker_id, v.model_version, v.total_sec, v.auto_learn, v.paused_reason, v.updated_at"
+        f" FROM voice_profiles v JOIN speakers s ON s.id = v.speaker_id {where} ORDER BY v.model_version",
+        params,
+    ):
+        profiles.setdefault(row["speaker_id"], []).append(VoiceprintSummary.model_validate(dict(row)))
+    rows = connection.execute(f"SELECT s.* FROM speakers s {where} ORDER BY s.name", params).fetchall()
+    return [Speaker.model_validate({**dict(row), "voiceprints": profiles.get(row["id"], [])}) for row in rows]
+
+
+# Cosine từ mức này trở lên coi là cùng một giọng; bằng ngưỡng nhận người DEFAULT_THRESHOLD của speech_ai.
+SAME_VOICE_MIN_SIMILARITY = 0.55
+_MEETING_CONFIRMED_SAMPLES = "source = 'manual' AND meeting_id = :meeting_id"
+_CONFIRMED_SAMPLE = f"{_MEETING_CONFIRMED_SAMPLES} AND speaker_label = :speaker_label"
+_SAME_VOICE_AUTO_SAMPLE = """
+    source = 'auto' AND meeting_id = :meeting_id AND :same_voice <= (
+        SELECT CASE WHEN ms.embedding IS NOT NULL AND ms.embedding_model = voice_samples.model_version
+                    THEN 1 - vec_distance_cosine(ms.embedding, voice_samples.embedding) END
+        FROM meeting_speakers ms
+        WHERE ms.meeting_id = :meeting_id AND ms.speaker_label = :speaker_label
     )
-    voice_profiles.recompute_profile(connection, speaker_id, embedding.model_version)
-    voice_profiles.set_auto_learn(connection, speaker_id, embedding.model_version, enabled=True)
+"""
+
+
+def _move_voice_sample(
+    connection: sqlite3.Connection, confirmation: SpeakerConfirmation, speaker_id: int
+) -> None:
+    """Sau khi nhãn được xác nhận là `speaker_id`: mẫu 'manual' của nhãn thuộc về người đó, và mẫu máy tự học
+    từ cùng giọng trong cuộc họp này chỉ còn tính cho người đó.
+
+    Mẫu tự học được tìm theo độ giống giọng chứ không theo nhãn, vì nhãn SPEAKER_xx đổi giữa các lần chạy
+    pipeline. Mẫu của người khác thành 'suspect' thay vì bị xóa, để hạn mức tự học của cuộc họp vẫn tính.
+    """
+    params = {
+        "meeting_id": confirmation.meeting_id,
+        "speaker_label": confirmation.speaker_label,
+        "speaker_id": speaker_id,
+        "same_voice": SAME_VOICE_MIN_SIMILARITY,
+    }
+    affected = _sample_owners(connection, f"({_CONFIRMED_SAMPLE}) OR ({_SAME_VOICE_AUTO_SAMPLE})", params)
+    connection.execute(f"DELETE FROM voice_samples WHERE {_CONFIRMED_SAMPLE}", params)
+    connection.execute(
+        "UPDATE voice_samples SET status = CASE WHEN speaker_id = :speaker_id THEN 'active' ELSE 'suspect' END"
+        f" WHERE {_SAME_VOICE_AUTO_SAMPLE}",
+        params,
+    )
+    connection.execute(
+        """
+        INSERT INTO voice_samples
+            (speaker_id, model_version, embedding, duration_sec, source, meeting_id, speaker_label)
+        SELECT :speaker_id, embedding_model, embedding, COALESCE(duration_sec, 0), 'manual',
+               meeting_id, speaker_label
+        FROM meeting_speakers
+        WHERE meeting_id = :meeting_id AND speaker_label = :speaker_label AND embedding IS NOT NULL
+        """,
+        params,
+    )
+    affected |= _sample_owners(connection, _CONFIRMED_SAMPLE, params)
+    _recompute_profiles(connection, affected)
+
+
+def _forget_confirmed_voices(connection: sqlite3.Connection, meeting_id: str) -> None:
+    """Bỏ các mẫu 'manual' học từ những xác nhận tên của cuộc họp, rồi tính lại hồ sơ của người có mẫu bị bỏ."""
+    params = {"meeting_id": meeting_id}
+    affected = _sample_owners(connection, _MEETING_CONFIRMED_SAMPLES, params)
+    connection.execute(f"DELETE FROM voice_samples WHERE {_MEETING_CONFIRMED_SAMPLES}", params)
+    _recompute_profiles(connection, affected)
+
+
+def _sample_owners(connection: sqlite3.Connection, where: str, params: dict[str, object]) -> set[tuple[int, str]]:
+    """`where` là một trong các mệnh đề cố định ở trên, không nhận chuỗi từ bên ngoài."""
+    rows = connection.execute(f"SELECT DISTINCT speaker_id, model_version FROM voice_samples WHERE {where}", params)
+    return {(row["speaker_id"], row["model_version"]) for row in rows}
+
+
+def _recompute_profiles(connection: sqlite3.Connection, owners: set[tuple[int, str]]) -> None:
+    for speaker_id, model_version in owners:
+        voice_profiles.recompute_profile(connection, speaker_id, model_version)

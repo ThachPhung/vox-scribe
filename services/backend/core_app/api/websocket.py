@@ -1,4 +1,6 @@
 """Đẩy trạng thái thu âm, sóng âm, tiến độ xử lý AI và sự kiện Zoom/Teams lên giao diện."""
+import asyncio
+from contextlib import suppress
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
@@ -8,6 +10,9 @@ from core_app.api.dependencies import ALLOWED_ORIGINS, get_event_hub
 from core_app.database.models import JobKind, JobStatus
 
 router = APIRouter()
+
+SEND_TIMEOUT_SEC = 2.0
+SEND_ERRORS = (WebSocketDisconnect, RuntimeError, OSError, TimeoutError)
 
 
 class RecordingStatusData(BaseModel):
@@ -103,12 +108,23 @@ class EventHub:
         self._connections.discard(websocket)
 
     async def broadcast(self, event: WsEvent) -> None:
+        """Gửi song song cho mọi UI; client lỗi, đã đóng hoặc chậm quá SEND_TIMEOUT_SEC bị ngắt kết nối."""
         message = event.model_dump(mode="json")
-        for websocket in list(self._connections):
-            try:
-                await websocket.send_json(message)
-            except (WebSocketDisconnect, RuntimeError):
-                self.disconnect(websocket)
+        await asyncio.gather(*(self._send(websocket, message) for websocket in list(self._connections)))
+
+    async def _send(self, websocket: WebSocket, message: dict) -> None:
+        try:
+            await asyncio.wait_for(websocket.send_json(message), timeout=SEND_TIMEOUT_SEC)
+        except SEND_ERRORS:
+            await self._drop(websocket)
+
+    async def _drop(self, websocket: WebSocket) -> None:
+        """Đóng hẳn kết nối để UI biết mà nối lại, thay vì giữ một socket mở nhưng không còn nhận sự kiện."""
+        self.disconnect(websocket)
+        with suppress(*SEND_ERRORS):
+            await asyncio.wait_for(
+                websocket.close(code=status.WS_1011_INTERNAL_ERROR), timeout=SEND_TIMEOUT_SEC
+            )
 
 
 EventHubDep = Annotated[EventHub, Depends(get_event_hub)]
@@ -122,7 +138,7 @@ async def events_ws(websocket: WebSocket, hub: EventHubDep) -> None:
         return
     await hub.connect(websocket)
     try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
+        while (await websocket.receive())["type"] != "websocket.disconnect":
+            pass
+    finally:
         hub.disconnect(websocket)

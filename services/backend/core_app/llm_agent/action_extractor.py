@@ -1,4 +1,5 @@
 """Agent bóc tách đầu việc, người phụ trách và hạn chót."""
+import re
 import unicodedata
 from collections.abc import Iterator
 
@@ -29,7 +30,7 @@ def _unsupported_by_transcript(report: MeetingReport, lines: list[TranscriptLine
     warnings = [
         f'Người phụ trách "{item.owner}" của đầu việc "{item.task}" không có trong transcript'
         for item in report.action_items
-        if item.owner is not None and _comparable(item.owner) not in transcript_text
+        if item.owner is not None and not _mentions(transcript_text, item.owner)
     ]
     for title, evidence_at in _evidence_of(report):
         if evidence_at.strip("[] ") not in timestamps:
@@ -46,3 +47,8 @@ def _evidence_of(report: MeetingReport) -> Iterator[tuple[str, str]]:
 
 def _comparable(text: str) -> str:
     return unicodedata.normalize("NFC", text).casefold()
+
+
+def _mentions(transcript_text: str, name: str) -> bool:
+    """Tên phải xuất hiện như một cụm từ trọn vẹn: "An" không được tính là có trong "Anh"."""
+    return re.search(rf"(?<!\w){re.escape(_comparable(name))}(?!\w)", transcript_text) is not None
