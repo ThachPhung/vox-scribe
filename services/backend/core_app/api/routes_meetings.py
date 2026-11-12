@@ -1,13 +1,7 @@
-"""API danh sách cuộc họp, file ghi âm, transcript, nhãn người nói và biên bản."""
-import logging
-import re
-from pathlib import Path
-
+"""API danh sách cuộc họp, transcript, nhãn người nói và biên bản."""
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import FileResponse
 
 from core_app.api.dependencies import Db, LlmReportGenerator, ReportSlots
-from core_app.api.routes_recording import Recordings
 from core_app.database import repositories
 from core_app.database.models import (
     Meeting,
@@ -23,10 +17,6 @@ from core_app.llm_agent.action_extractor import find_report_warnings
 from core_app.llm_agent.summarizer import PROMPT_VERSION, build_transcript_lines, summarize_meeting
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
-logger = logging.getLogger("voxscribe.meetings")
-
-# Ký tự Windows không cho dùng trong tên file
-_UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 @router.get("")
@@ -39,37 +29,9 @@ def get_meeting(meeting_id: str, db: Db) -> Meeting:
     return repositories.get_meeting(db, meeting_id)
 
 
-@router.get("/{meeting_id}/audio", response_class=FileResponse)
-def get_meeting_audio(meeting_id: str, db: Db) -> FileResponse:
-    """File WAV stereo của cuộc họp (trái = mic, phải = loa), tải về với tên theo tên cuộc họp."""
-    meeting = repositories.get_meeting(db, meeting_id)
-    if not meeting.audio_path or not Path(meeting.audio_path).is_file():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Cuộc họp này không có file ghi âm")
-    filename = _UNSAFE_FILENAME.sub("-", meeting.title).strip(" .") or "cuoc-hop"
-    return FileResponse(meeting.audio_path, media_type="audio/wav", filename=f"{filename}.wav")
-
-
 @router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_meeting(meeting_id: str, db: Db, recordings: Recordings) -> None:
-    """Xoá cuộc họp kèm file ghi âm; nếu đang ghi thì dừng trước."""
-    meeting = repositories.get_meeting(db, meeting_id)
-    audio_path = meeting.audio_path
-    if recordings.is_recording(meeting_id):
-        audio_path, _duration = recordings.stop(meeting_id)
+def delete_meeting(meeting_id: str, db: Db) -> None:
     repositories.delete_meeting(db, meeting_id)
-    if audio_path:
-        _remove_recording(Path(audio_path), recordings.recordings_dir)
-
-
-def _remove_recording(path: Path, recordings_dir: Path) -> None:
-    """Chỉ xoá file nằm trong thư mục ghi âm của app, không bao giờ xoá file ở nơi khác."""
-    try:
-        if path.resolve().parent != recordings_dir.resolve():
-            logger.warning("Bỏ qua xoá %s: không nằm trong thư mục ghi âm", path)
-            return
-        path.unlink(missing_ok=True)
-    except OSError:
-        logger.exception("Không xoá được file ghi âm %s", path)
 
 
 @router.put("/{meeting_id}/transcript")

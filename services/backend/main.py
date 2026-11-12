@@ -1,9 +1,8 @@
 """Điểm khởi chạy FastAPI Server."""
-import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, closing
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import get_args
 
@@ -15,12 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import OpenAI
 
-from audio_engine.process_watcher import AppEvent, ProcessWatcher
 from core_app.api import routes_meetings, routes_recording, routes_speakers, websocket
 from core_app.api.dependencies import ALLOWED_ORIGINS, Services
-from core_app.api.websocket import AppDetectedData, AppDetectedEvent, EventHub, WsEvent
-from core_app.database.connection import initialize_database, open_connection
-from core_app.database.repositories import ConflictError, NotFoundError, close_unfinished_recordings
+from core_app.api.websocket import EventHub
+from core_app.database.connection import initialize_database
+from core_app.database.repositories import ConflictError, NotFoundError
 from core_app.llm_agent.summarizer import (
     EmptyTranscriptError,
     GenerationInProgressError,
@@ -31,13 +29,11 @@ from core_app.llm_agent.summarizer import (
     ReportGenerationSlots,
     ReportGenerator,
 )
-from core_app.recording.session import RecordingSessions
 
 HOST = "127.0.0.1"
 PORT = 8000
 ENV_FILE = Path(__file__).parent / ".env"
 DB_FILENAME = "voxscribe.db"
-RECORDINGS_DIRNAME = "recordings"
 DEFAULT_LLM_PROVIDER = "openai"
 DEFAULT_LLM_MODEL = "gpt-6-luna"
 DEFAULT_REASONING_EFFORT = "medium"
@@ -50,13 +46,11 @@ logger = logging.getLogger("voxscribe")
 
 def services_from_env() -> Services:
     """Đọc cấu hình từ biến môi trường (hoặc file .env) một lần khi server khởi động."""
-    data_dir = _data_dir_from_env()
     return Services(
-        db_path=data_dir / DB_FILENAME,
+        db_path=_data_dir_from_env() / DB_FILENAME,
         report_generator=_report_generator_from_env(),
         report_slots=ReportGenerationSlots(MAX_CONCURRENT_REPORTS),
         event_hub=EventHub(),
-        recordings=RecordingSessions(data_dir / RECORDINGS_DIRNAME, publish=lambda _event: None),
     )
 
 
@@ -100,17 +94,8 @@ def create_app(build_services: Callable[[], Services] = services_from_env) -> Fa
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         services = build_services()
         initialize_database(services.db_path)
-        _close_unfinished_recordings(services.db_path)
         app.state.services = services
-        publish = _thread_publisher(services.event_hub, asyncio.get_running_loop())
-        services.recordings.set_publisher(publish)
-        watcher = _start_meeting_watcher(publish) if services.start_watcher else None
-        try:
-            yield
-        finally:
-            if watcher is not None:
-                watcher.stop()
-            services.recordings.stop_all()
+        yield
 
     app = FastAPI(title="VoxScribe Backend", lifespan=lifespan)
     app.add_middleware(
@@ -130,33 +115,6 @@ def create_app(build_services: Callable[[], Services] = services_from_env) -> Fa
         return {"status": "ok"}
 
     return app
-
-
-def _close_unfinished_recordings(db_path: Path) -> None:
-    with closing(open_connection(db_path)) as connection:
-        closed = close_unfinished_recordings(connection)
-    if closed:
-        logger.warning("Đã đóng %d cuộc họp bị bỏ dở khi server tắt giữa lúc ghi", closed)
-
-
-def _thread_publisher(hub: EventHub, loop: asyncio.AbstractEventLoop) -> Callable[[WsEvent], None]:
-    """Cho thread nền (ghi âm, watcher) gửi sự kiện WebSocket qua event loop của server."""
-
-    def publish(event: WsEvent) -> None:
-        asyncio.run_coroutine_threadsafe(hub.broadcast(event), loop)
-
-    return publish
-
-
-def _start_meeting_watcher(publish: Callable[[WsEvent], None]) -> ProcessWatcher:
-    def on_event(event: AppEvent) -> None:
-        if event.running:
-            logger.info("Phát hiện %s đang mở", event.app)
-            publish(AppDetectedEvent(data=AppDetectedData(app=event.app)))
-
-    watcher = ProcessWatcher()
-    watcher.start(on_event)
-    return watcher
 
 
 def _error_handler(status_code: int) -> Callable[[Request, Exception], JSONResponse]:

@@ -1,4 +1,4 @@
-"""Đẩy trạng thái thu âm, sóng âm, tiến độ xử lý AI và sự kiện Zoom/Teams/Meet lên giao diện."""
+"""Đẩy trạng thái thu âm, sóng âm, tiến độ xử lý AI và sự kiện Zoom/Teams lên giao diện."""
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
@@ -39,7 +39,7 @@ class NetworkStatusData(BaseModel):
 
 
 class AppDetectedData(BaseModel):
-    app: Literal["zoom", "teams", "meet"]
+    app: Literal["zoom", "teams"]
 
 
 class RecordingStatusEvent(BaseModel):
