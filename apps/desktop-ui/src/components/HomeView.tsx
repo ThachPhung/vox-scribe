@@ -1,8 +1,8 @@
 // Màn hình chính: chuẩn bị ghi cuộc họp mới, hoặc theo dõi buổi đang ghi.
 import type { Recorder } from "../hooks/useRecorder";
 import { formatClock } from "../hooks/useRecorder";
-import type { CaptureMode } from "../types";
-import Icon, { type IconName } from "./Icon";
+import { CAPTURE_MODES } from "../captureModes";
+import Icon from "./Icon";
 import WaveformMeter, { isWaveformFresh, type WaveformSample } from "./WaveformMeter";
 
 interface Props {
@@ -15,11 +15,6 @@ interface Props {
 
 /** Đợi vài giây đầu trước khi báo thiếu dữ liệu sóng âm, tránh chữ nháy lúc mới bắt đầu. */
 const NO_LEVEL_GRACE_SEC = 2;
-
-const MODES:{ value: CaptureMode; icon: IconName; label: string; hint: string }[] = [
-  { value: "room", icon: "room", label: "Phòng họp", hint: "Mic + loa, họp trực tiếp" },
-  { value: "headset", icon: "headset", label: "Tai nghe", hint: "Họp online qua Meet, Zoom, Teams" },
-];
 
 export default function HomeView({ recorder, waveform, connected, liveTitle }: Props) {
   const { active, busy, error } = recorder;
@@ -83,9 +78,9 @@ export default function HomeView({ recorder, waveform, connected, liveTitle }: P
         </label>
 
         <fieldset className="field">
-          <legend className="field-label">Chế độ ghi</legend>
+          <legend className="field-label">Hình thức họp</legend>
           <div className="mode-grid" role="radiogroup">
-            {MODES.map((m) => (
+            {CAPTURE_MODES.map((m) => (
               <button
                 type="button"
                 key={m.value}

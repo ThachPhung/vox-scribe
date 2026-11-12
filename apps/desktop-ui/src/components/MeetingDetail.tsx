@@ -1,6 +1,7 @@
 // Màn hình chi tiết một cuộc họp: lời thoại bên trái, biên bản bên phải.
 // Cửa sổ hẹp thì chuyển sang hai tab.
 import { useEffect, useState } from "react";
+import { captureModeInfo } from "../captureModes";
 import { api } from "../services/apiClient";
 import type { Meeting, Transcript } from "../types";
 import { fmtDateTime, fmtDuration } from "../utils";
@@ -42,6 +43,8 @@ export default function MeetingDetail({ meetingId, refreshKey = 0 }: Props) {
       .catch((e: Error) => setTranscriptError(e.message));
   }, [meetingId, refreshKey]);
 
+  const modeInfo = captureModeInfo(meeting?.capture_mode ?? null);
+
   return (
     <section className="detail">
       <header className="detail-head">
@@ -55,10 +58,12 @@ export default function MeetingDetail({ meetingId, refreshKey = 0 }: Props) {
               <span>
                 <Icon name="clock" size={14} /> {fmtDuration(meeting.duration_sec)}
               </span>
-              <span>
-                <Icon name={meeting.capture_mode === "headset" ? "headset" : "room"} size={14} />
-                {meeting.capture_mode === "headset" ? "Tai nghe" : "Phòng họp"}
-              </span>
+              {modeInfo && (
+                <span>
+                  <Icon name={modeInfo.icon} size={14} />
+                  {modeInfo.label}
+                </span>
+              )}
               {meeting.status === "recording" && (
                 <span className="chip danger">
                   <span className="rec-dot" /> Đang ghi
