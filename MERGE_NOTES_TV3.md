@@ -94,7 +94,7 @@ Nhánh này đã chứa các commit của PR #7 (`thachpv-dev`, tới `ba42188`)
   - Sau khi nhãn được xác nhận là người Y, các mẫu `auto` **cùng giọng** trong cuộc họp đó (cosine từ 0.55 với vector của nhãn) được xử lý lại: của Y thì `active`, của người khác thì `suspect`. Tìm theo giọng chứ không theo nhãn, vì nhãn `SPEAKER_xx` đổi giữa các lần chạy pipeline. Dòng `suspect` được giữ để hạn mức mỗi cuộc họp vẫn tính.
   - Xác nhận lại một người (kể cả khi nhãn đã xác nhận rồi) bật lại tự học cho người đó.
 - **DB đã lên v3 theo PR #7** nâng tiếp lên v4 bình thường.
-- **Thứ tự merge:** PR #7 đang xung đột với `dev` ở `speech_ai/pipeline_runner.py`. TV2 cần cập nhật `thachpv-dev` trước; sau đó nhánh này merge `thachpv-dev` mới rồi mới mở PR vào `dev`.
+- **Thứ tự merge:** PR #7 đã merge vào `dev` (`fc63654`). Xung đột của nó với `dev` chỉ là hai dòng ví dụ lệnh `--db` trong chú thích đầu file `speech_ai/pipeline_runner.py`, đã giữ theo nhánh `thachpv-dev`. Nhánh này đã merge `dev` mới, nên PR chỉ còn phần `core_app` của TV3.
 - **TV3 đã sửa hai chỗ trong `core_app/database/voice_profiles.py` của PR #7** (TV2 xem giúp, cả hai đều nằm trong `weighted_centroid`):
   - Mẫu `manual` tính theo số giây thật nhân 2. Mức 30 giây chỉ còn dùng khi không rõ số giây (hồ sơ có từ trước v3), vì confirm giờ lấy số giây từ transcript. Hằng số đổi tên từ `MANUAL_MIN_SEC` thành `MANUAL_UNKNOWN_SEC`.
   - Khi các mẫu triệt tiêu nhau (tổng gần vector 0) hàm trả `None`, nên hồ sơ bị xóa thay vì lưu một vector toàn số 0.
