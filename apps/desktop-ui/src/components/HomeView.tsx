@@ -9,14 +9,19 @@ interface Props {
   recorder: Recorder;
   waveform: WaveformSample | null;
   connected: boolean;
+  /** Tên thật của cuộc họp đang ghi (lấy từ danh sách), đúng cả khi tải lại trang giữa chừng. */
+  liveTitle?: string;
 }
 
-const MODES: { value: CaptureMode; icon: IconName; label: string; hint: string }[] = [
+/** Đợi vài giây đầu trước khi báo thiếu dữ liệu sóng âm, tránh chữ nháy lúc mới bắt đầu. */
+const NO_LEVEL_GRACE_SEC = 2;
+
+const MODES:{ value: CaptureMode; icon: IconName; label: string; hint: string }[] = [
   { value: "room", icon: "room", label: "Phòng họp", hint: "Mic + loa, họp trực tiếp" },
   { value: "headset", icon: "headset", label: "Tai nghe", hint: "Họp online qua Meet, Zoom, Teams" },
 ];
 
-export default function HomeView({ recorder, waveform, connected }: Props) {
+export default function HomeView({ recorder, waveform, connected, liveTitle }: Props) {
   const { active, busy, error } = recorder;
 
   if (active) {
@@ -27,7 +32,7 @@ export default function HomeView({ recorder, waveform, connected }: Props) {
             <span className="live-pill">
               <span className="rec-dot" /> Đang ghi
             </span>
-            <span className="live-title">{recorder.title}</span>
+            <span className="live-title">{liveTitle ?? recorder.title}</span>
           </div>
           <div className="live-clock">{formatClock(recorder.elapsed)}</div>
           <WaveformMeter active waveform={waveform} bars={120} className="waveform-lg" />
@@ -38,7 +43,9 @@ export default function HomeView({ recorder, waveform, connected }: Props) {
             <span>
               <i className="swatch sys" /> Âm thanh hệ thống (kênh phải)
             </span>
-            {!isWaveformFresh(waveform) && <span className="muted">Sóng mô phỏng, đang chờ dữ liệu từ backend</span>}
+            {!isWaveformFresh(waveform) && recorder.elapsed > NO_LEVEL_GRACE_SEC && (
+              <span className="muted">Chưa nhận được mức âm từ backend</span>
+            )}
           </div>
           <button className="btn btn-stop" onClick={recorder.stop} disabled={busy}>
             <Icon name="stop" size={14} />

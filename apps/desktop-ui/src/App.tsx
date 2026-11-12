@@ -10,6 +10,8 @@ import { useMeetings } from "./hooks/useMeetings";
 import { formatClock, useRecorder, type LiveStatus } from "./hooks/useRecorder";
 import type { WsEvent } from "./types";
 
+const MEETING_APP_NAMES = { zoom: "Zoom", teams: "Microsoft Teams", meet: "Google Meet" } as const;
+
 type View = { kind: "home" } | { kind: "detail"; meetingId: string };
 
 export default function App() {
@@ -29,11 +31,7 @@ export default function App() {
         setWaveform({ ...event.data, at: Date.now() });
         break;
       case "app.detected":
-        setNotice(
-          event.data.app === "zoom"
-            ? "Zoom đang mở. Bạn có muốn ghi cuộc họp này?"
-            : "Microsoft Teams đang mở. Bạn có muốn ghi cuộc họp này?",
-        );
+        setNotice(`${MEETING_APP_NAMES[event.data.app]} đang mở. Bạn có muốn ghi cuộc họp này?`);
         break;
       default:
         break;
@@ -95,11 +93,18 @@ export default function App() {
       </aside>
 
       <main className="main">
-        {view.kind === "home" ? (
-          <HomeView recorder={recorder} waveform={waveform} connected={connected} />
-        ) : (
-          <MeetingDetail meetingId={view.meetingId} />
-        )}
+        <div key={view.kind === "home" ? `home-${recorder.active}` : view.meetingId} className="view-enter view-root">
+          {view.kind === "home" ? (
+            <HomeView
+              recorder={recorder}
+              waveform={waveform}
+              connected={connected}
+              liveTitle={meetings.find((m) => m.id === recorder.meetingId)?.title}
+            />
+          ) : (
+            <MeetingDetail meetingId={view.meetingId} refreshKey={refreshKey} />
+          )}
+        </div>
       </main>
 
       {view.kind !== "home" && <RecorderBar recorder={recorder} waveform={waveform} onOpen={goHome} />}

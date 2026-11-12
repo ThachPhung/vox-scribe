@@ -33,9 +33,17 @@ export default function MeetingsList({ meetings, error, selectedId, onSelect, on
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setQuery("");
+          }}
           placeholder="Tìm cuộc họp"
           aria-label="Tìm cuộc họp"
         />
+        {query && (
+          <button className="search-clear" onClick={() => setQuery("")} aria-label="Xoá tìm kiếm" title="Xoá (Esc)">
+            <Icon name="x" size={13} />
+          </button>
+        )}
       </div>
 
       <div className="list-head">

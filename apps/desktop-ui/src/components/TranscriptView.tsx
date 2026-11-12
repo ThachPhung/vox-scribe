@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import type { Segment } from "../types";
 import { fmtDuration } from "../utils";
+import Icon from "./Icon";
 
 interface Props {
   segments: Segment[];
@@ -23,7 +24,15 @@ export default function TranscriptView({ segments }: Props) {
   }, [segments]);
 
   if (segments.length === 0) {
-    return <p className="pane-empty">Chưa có lời thoại cho cuộc họp này.</p>;
+    return (
+      <div className="empty-state">
+        <div className="empty-icon">
+          <Icon name="wave" size={22} />
+        </div>
+        <h3>Chưa có lời thoại</h3>
+        <p>Lời thoại theo từng người nói sẽ hiện ở đây sau khi bản ghi được chép lời.</p>
+      </div>
+    );
   }
 
   return (

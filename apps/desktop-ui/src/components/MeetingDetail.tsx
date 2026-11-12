@@ -11,20 +11,26 @@ import TranscriptView, { transcriptToText } from "./TranscriptView";
 
 interface Props {
   meetingId: string;
+  /** Tăng lên khi danh sách cuộc họp thay đổi (vd. vừa dừng ghi) để tải lại thông tin. */
+  refreshKey?: number;
 }
 
 type Tab = "transcript" | "report";
 
-export default function MeetingDetail({ meetingId }: Props) {
+export default function MeetingDetail({ meetingId, refreshKey = 0 }: Props) {
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("transcript");
 
+  // Đổi cuộc họp thì xoá dữ liệu cũ; chỉ làm mới (refreshKey) thì giữ nguyên để không nháy.
   useEffect(() => {
     setMeeting(null);
     setTranscript(null);
     setTranscriptError(null);
+  }, [meetingId]);
+
+  useEffect(() => {
     api.get<Meeting>(`/meetings/${meetingId}`).then(setMeeting).catch(() => setMeeting(null));
     api
       .get<Transcript>(`/meetings/${meetingId}/transcript`)
@@ -33,7 +39,7 @@ export default function MeetingDetail({ meetingId }: Props) {
         setTranscriptError(null);
       })
       .catch((e: Error) => setTranscriptError(e.message));
-  }, [meetingId]);
+  }, [meetingId, refreshKey]);
 
   return (
     <section className="detail">
@@ -52,6 +58,11 @@ export default function MeetingDetail({ meetingId }: Props) {
                 <Icon name={meeting.capture_mode === "headset" ? "headset" : "room"} size={14} />
                 {meeting.capture_mode === "headset" ? "Tai nghe" : "Phòng họp"}
               </span>
+              {meeting.audio_path && (
+                <span className="chip" title={meeting.audio_path}>
+                  <Icon name="wave" size={13} /> Đã lưu âm thanh
+                </span>
+              )}
               {meeting.status === "recording" && (
                 <span className="chip danger">
                   <span className="rec-dot" /> Đang ghi
@@ -75,7 +86,9 @@ export default function MeetingDetail({ meetingId }: Props) {
         <div className="pane pane-transcript">
           <div className="pane-head">
             <h2>Lời thoại</h2>
-            {transcript && <span className="chip">{transcript.segments.length} câu</span>}
+            {transcript && transcript.segments.length > 0 && (
+              <span className="chip">{transcript.segments.length} câu</span>
+            )}
             <div className="pane-actions">
               {transcript && transcript.segments.length > 0 && (
                 <CopyButton getText={() => transcriptToText(transcript.segments)} />

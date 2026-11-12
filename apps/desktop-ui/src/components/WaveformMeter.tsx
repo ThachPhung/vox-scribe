@@ -1,5 +1,5 @@
 // Vẽ sóng âm hai kênh (trái = mic, phải = hệ thống) từ mức WS nhận được.
-// Khi đang ghi mà chưa có dữ liệu thật từ backend thì vẽ mức mô phỏng để giữ khung.
+// Khi đang ghi luôn có một dải màu "thở" nhẹ làm nền; mức âm thật từ backend vẽ chồng lên.
 import { useEffect, useRef } from "react";
 
 export interface WaveformSample {
@@ -17,6 +17,11 @@ interface Props {
 }
 
 const STALE_MS = 2000;
+// Lớp nền "thở" khi đang ghi: dao động quanh 0,18 (± 0,12), giống dải màu bản trước.
+const IDLE_BASE = 0.18;
+const IDLE_SWING = 0.12;
+const IDLE_JITTER = 0.06;
+const IDLE_SPREAD = 0.22; // độ lệch pha giữa hai cột cạnh nhau → sóng chạy ngang
 
 /** true nếu backend vừa gửi mức sóng gần đây. */
 export function isWaveformFresh(waveform: WaveformSample | null): boolean {
@@ -46,8 +51,10 @@ export default function WaveformMeter({ active, waveform, bars = 96, className =
 
     const history = Array.from({ length: bars }, () => ({ l: 0, r: 0 }));
     let raf = 0;
-    let phase = 0;
     let frame = 0;
+    let smoothL = 0;
+    let smoothR = 0;
+    let phase = 0;
 
     const draw = () => {
       raf = requestAnimationFrame(draw);
@@ -57,14 +64,18 @@ export default function WaveformMeter({ active, waveform, bars = 96, className =
       let l = 0;
       let r = 0;
       if (active) {
-        if (isWaveformFresh(waveform) && waveform) {
-          l = waveform.left;
-          r = waveform.right;
-        } else {
-          phase += 0.18;
-          l = Math.min(1, 0.18 + 0.12 * Math.sin(phase) + Math.random() * 0.06);
-          r = Math.min(1, 0.18 + 0.12 * Math.cos(phase * 0.85) + Math.random() * 0.06);
-        }
+        const fresh = waveform !== null && isWaveformFresh(waveform);
+        // Mức thật: căn bậc hai để tiếng nói nhỏ vẫn nhìn thấy; attack nhanh, release chậm cho mượt.
+        const targetL = fresh ? Math.sqrt(waveform.left) : 0;
+        const targetR = fresh ? Math.sqrt(waveform.right) : 0;
+        smoothL = targetL > smoothL ? targetL : smoothL * 0.82 + targetL * 0.18;
+        smoothR = targetR > smoothR ? targetR : smoothR * 0.82 + targetR * 0.18;
+        l = Math.min(1, smoothL);
+        r = Math.min(1, smoothR);
+        phase += 0.16;
+      } else {
+        smoothL = 0;
+        smoothR = 0;
       }
       history.push({ l, r });
       history.shift();
@@ -83,7 +94,15 @@ export default function WaveformMeter({ active, waveform, bars = 96, className =
       const maxH = mid - 1;
       const minH = Math.max(1, Math.round(height / 40));
       for (let i = 0; i < bars; i++) {
-        const { l: sl, r: sr } = history[i];
+        // Đang ghi: cả dải màu "thở" thành sóng chạy ngang ngay từ giây đầu (kể cả lúc im lặng);
+        // mức âm thật cuộn từ phải sang và cao hơn hẳn lớp nền này.
+        const wave = phase - i * IDLE_SPREAD;
+        const sl = active
+          ? Math.max(history[i].l, IDLE_BASE + IDLE_SWING * Math.sin(wave) + IDLE_JITTER * Math.random())
+          : history[i].l;
+        const sr = active
+          ? Math.max(history[i].r, IDLE_BASE + IDLE_SWING * Math.cos(wave * 0.85) + IDLE_JITTER * Math.random())
+          : history[i].r;
         const x = i * slot;
         const hl = Math.max(minH, sl * maxH);
         const hr = Math.max(minH, sr * maxH);

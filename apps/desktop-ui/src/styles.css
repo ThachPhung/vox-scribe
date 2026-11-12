@@ -1206,3 +1206,128 @@ legend.field-label {
     transform: translateY(-6px);
   }
 }
+
+/* ==========================================================================
+   Chuyển động và hoàn thiện
+   Chỉ animate transform/opacity; tắt hết khi người dùng chọn giảm chuyển động.
+   ========================================================================== */
+:root {
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+}
+
+/* Thanh cuộn mảnh theo màu giao diện (thay thanh cuộn Windows có mũi tên) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* Ô tìm kiếm: chỉ một viền focus (ở khung ngoài), có nút xoá */
+.search input:focus-visible {
+  box-shadow: none;
+}
+
+.search-clear {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: -4px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+
+.search-clear:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* Màn hình mới hiện ra nhẹ nhàng khi đổi giữa Ghi mới / chi tiết cuộc họp */
+.view-enter {
+  animation: view-in var(--dur) var(--ease-out);
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* Thanh ghi âm nổi trượt lên; giữ translateX(-50%) để vẫn căn giữa */
+.dock {
+  animation: dock-in 260ms var(--ease-out);
+}
+
+@keyframes dock-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 12px) scale(0.97);
+  }
+}
+
+/* Nhấn nút có phản hồi */
+.btn,
+.new-btn,
+.dock-stop,
+.dock-info,
+.mode-option,
+.meeting-item {
+  transition:
+    background var(--dur-fast),
+    border-color var(--dur-fast),
+    color var(--dur-fast),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.btn:active:not(:disabled),
+.new-btn:active,
+.dock-stop:active:not(:disabled),
+.dock-info:active,
+.mode-option:active {
+  transform: scale(0.98);
+}
+
+.dock-info:hover {
+  filter: brightness(1.08);
+}
+
+/* Lời thoại trống: cùng kiểu với biên bản trống */
+.pane-body > .empty-state {
+  margin-top: 64px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-enter,
+  .dock,
+  .toast {
+    animation: none;
+  }
+
+  .btn:active:not(:disabled),
+  .new-btn:active,
+  .dock-stop:active:not(:disabled),
+  .dock-info:active,
+  .mode-option:active {
+    transform: none;
+  }
+}
+
+/* Khung bọc mỗi màn hình (để chạy hiệu ứng vào), giữ nguyên bố cục cột của .main */
+.view-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Cửa sổ hẹp: tiêu đề cột đã ẩn (dùng tab), nên bỏ luôn hàng tiêu đề nếu không còn gì trong đó */
+@media (max-width: 1180px) {
+  .pane-head:not(:has(.chip, .pane-actions > *, .btn)) {
+    display: none;
+  }
+}

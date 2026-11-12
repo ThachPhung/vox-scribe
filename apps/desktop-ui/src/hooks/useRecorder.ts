@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../services/apiClient";
 import type { CaptureMode, Meeting, RecordingStatusData } from "../types";
 
+const TITLE_REFRESH_MS = 15_000;
+
 export type LiveStatus = (RecordingStatusData & { meeting_id: string }) | null;
 
 export function defaultTitle(): string {
@@ -36,7 +38,13 @@ interface Options {
 }
 
 export function useRecorder(status: LiveStatus, { onStarted, onStopped }: Options): Recorder {
-  const [title, setTitle] = useState(defaultTitle);
+  const [title, setTitleState] = useState(defaultTitle);
+  // Tên mặc định theo giờ hiện tại; người dùng gõ tên rồi thì không tự đổi nữa.
+  const [titleEdited, setTitleEdited] = useState(false);
+  const setTitle = (value: string) => {
+    setTitleState(value);
+    setTitleEdited(true);
+  };
   const [mode, setMode] = useState<CaptureMode>("room");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -64,19 +72,32 @@ export function useRecorder(status: LiveStatus, { onStarted, onStopped }: Option
     return () => clearInterval(timer);
   }, [active]);
 
+  useEffect(() => {
+    if (active || titleEdited) return;
+    setTitleState(defaultTitle());
+    const timer = setInterval(() => setTitleState(defaultTitle()), TITLE_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [active, titleEdited]);
+
+  // Backend gửi thời gian đã ghi mỗi 0,5 s; giữa hai lần (hoặc khi backend chưa gửi) thì
+  // đếm theo đồng hồ máy để số giây luôn chạy.
   const elapsed =
-    wsState === "recording" || wsState === "paused"
+    wsState === "paused"
       ? elapsedRef.current
       : startedAt
         ? Math.max(elapsedRef.current, (Date.now() - startedAt) / 1000)
-        : elapsedBase.current;
+        : active
+          ? elapsedRef.current
+          : elapsedBase.current;
 
   const start = async () => {
     setBusy(true);
     setError(null);
     try {
+      const finalTitle = (titleEdited ? title.trim() : "") || defaultTitle();
+      setTitleState(finalTitle);
       const meeting = await api.post<Meeting>("/recording/start", {
-        title: title.trim() || defaultTitle(),
+        title: finalTitle,
         capture_mode: mode,
       });
       setMeetingId(meeting.id);
@@ -100,7 +121,8 @@ export function useRecorder(status: LiveStatus, { onStarted, onStopped }: Option
       elapsedBase.current = elapsed;
       setMeetingId(null);
       setStartedAt(null);
-      setTitle(defaultTitle());
+      setTitleState(defaultTitle());
+      setTitleEdited(false);
       onStopped(id);
     } catch (e) {
       setError(`Không dừng được ghi âm: ${(e as Error).message}`);

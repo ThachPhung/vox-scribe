@@ -76,6 +76,6 @@ export type WsEvent =
   | { type: "recording.status"; meeting_id: string; data: RecordingStatusData }
   | { type: "recording.waveform"; meeting_id: string; data: { left: number; right: number } }
   | { type: "network.status"; meeting_id: null; data: { online: boolean } }
-  | { type: "app.detected"; meeting_id: null; data: { app: "zoom" | "teams" } }
+  | { type: "app.detected"; meeting_id: null; data: { app: "zoom" | "teams" | "meet" } }
   | { type: "job.progress"; meeting_id: string; data: unknown }
   | { type: "job.error"; meeting_id: string; data: unknown };
