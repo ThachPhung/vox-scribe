@@ -57,7 +57,9 @@ export default function AudioBar({ meetingId, title, audioPath }: Props) {
 
   return (
     <div className="audio-bar">
-      <audio controls preload="metadata" src={src} aria-label="Nghe lại bản ghi" />
+      {/* Ẩn mục "Download" trong menu ba chấm của WebView: nó không chạy trong app Tauri,
+          việc lưu file đi qua nút "Tải âm thanh" bên cạnh. */}
+      <audio controls controlsList="nodownload" preload="metadata" src={src} aria-label="Nghe lại bản ghi" />
       <button className="btn btn-sm" onClick={save} disabled={saving} title="Lưu file WAV về máy">
         <Icon name="download" size={14} />
         {saving ? "Đang lưu…" : "Tải âm thanh"}
