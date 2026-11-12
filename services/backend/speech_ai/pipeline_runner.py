@@ -1,10 +1,15 @@
 """Điều phối toàn bộ luồng từ file .wav ra JSON lời thoại.
 
-File stereo của audio_engine (Trái = Mic, Phải = Loa/Zoom/Meet/Teams):
+File stereo của audio_engine (Trái = Mic, Phải = Loa/Zoom/Meet/Teams), theo `capture_mode`
+(cùng giá trị với `meetings.capture_mode` của core_app):
 
+  headset (họp online, mỗi máy 1 người):
     Kênh Trái (Mic) ─► Silero VAD ─► SPEAKER_00 (người dùng máy này)
                          └─ bỏ đoạn "vọng" từ loa vào mic (echo/bleed)
     Kênh Phải (Loa) ─► diarization (pyannote-seg-3.0 + CAM++ + refine) ─► SPEAKER_01, 02...
+  room (họp tại chỗ, nhiều người chung 1 mic):
+    Kênh Trái (Mic) ─► bỏ đoạn vọng ─► diarization (ngưỡng gộp `room_merge_threshold`) ─► SPEAKER_00..k-1
+    Kênh Phải (Loa) ─► diarization ─► SPEAKER_k, k+1... (đánh số tiếp, không trùng nhãn Mic)
     các đoạn ─► STT (Zipformer-vi int8 | faster-whisper) ─► dấu câu (ViBERT-capu)
     mỗi SPEAKER_xx ─► vector CAM++ 192 chiều ─► so khớp danh bạ giọng ─► speaker_name
 
@@ -15,6 +20,8 @@ File mono: cả file đi theo nhánh Kênh Phải (SPEAKER_01, 02...).
 Chạy thử (từ thư mục services/backend):
     python -m speech_ai.pipeline_runner samples/meeting_vi.wav -o out.json
     python -m speech_ai.pipeline_runner samples/meeting_stereo.wav --voicebook data/voicebook.json --mic-name "Thạch"
+    # Họp tại chỗ: tách nhiều người trên Mic
+    python -m speech_ai.pipeline_runner ghi_am.wav --capture-mode room
     # Dùng chung DB với core_app: so khớp từ voice_profiles + tự học sample mới
     python -m speech_ai.pipeline_runner samples/meeting_stereo.wav --db data/voxscribe.db --meeting-id <id> --mic-name "Thạch"
 """
@@ -23,7 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +45,7 @@ from .transcriber import DEFAULT_MODELS_DIR, Utterance, create_transcriber
 UNKNOWN = "SPEAKER_UNKNOWN"
 MIC_LABEL = "SPEAKER_00"
 DEFAULT_VAD = DEFAULT_MODELS_DIR / "silero_vad.onnx"
+CAPTURE_MODES = ("headset", "room")
 
 
 @dataclass
@@ -46,6 +54,8 @@ class PipelineConfig:
     whisper_model: str = "small"
     language: str | None = "vi"
     diarize: bool = True
+    capture_mode: str = "headset"  # headset: Mic = 1 người | room: tách nhiều người trên Mic
+    room_merge_threshold: float = 0.70  # ngưỡng gộp cụm trên Mic khi room (chặt hơn Loa: giọng qua 1 mic dễ giống nhau)
     num_speakers: int | None = None  # số người ở Kênh Phải (hoặc cả file mono)
     cluster_threshold: float = 0.5
     merge_threshold: float = 0.65
@@ -56,7 +66,7 @@ class PipelineConfig:
     punctuate: bool = True  # backend whisper đã có dấu câu sẵn -> bỏ qua
     voicebook: str | None = None  # đường dẫn danh bạ giọng (JSON); None = không so khớp tên
     match_threshold: float = DEFAULT_THRESHOLD
-    mic_name: str | None = None  # tên người dùng Mic (nếu biết), ưu tiên hơn so khớp danh bạ
+    mic_name: str | None = None  # tên người dùng Mic (chỉ dùng khi headset), ưu tiên hơn so khớp danh bạ
     drop_bleed: bool = True
     db_path: str | None = None  # DB SQLite của core_app; có thì dùng thay voicebook JSON
     learn: bool = True  # tự học sample vào DB (chỉ khi có db_path)
@@ -115,27 +125,37 @@ def _split_long(audio: np.ndarray, start: float, end: float, vad: VadSegmenter, 
 
 
 def _system_branch(
-    audio: np.ndarray, cfg: PipelineConfig, vad: VadSegmenter, embedder: Embedder, channel: str, timings: dict
+    audio: np.ndarray,
+    cfg: PipelineConfig,
+    vad: VadSegmenter,
+    embedder: Embedder,
+    channel: str,
+    timings: dict,
+    label_offset: int = 1,
+    merge_threshold: float | None = None,
+    num_speakers: int | None = None,
 ) -> tuple[list[tuple[str, AudioChunk]], dict[str, _Speaker]]:
+    """Diarization 1 kênh (Loa / file mono / Mic khi họp tại chỗ)."""
     if not cfg.diarize:
         return [(UNKNOWN, c) for c in vad.segment(audio)], {}
+    key = "diarize_mic" if channel == "mic" else "diarize"
     t = time.perf_counter()
     # Kênh không có giọng nói (im lặng / nhạc / tiếng bíp thử loa) -> khỏi chạy diarization
     if not vad.segment(audio):
-        timings["diarize"] = round(time.perf_counter() - t, 2)
+        timings[key] = round(time.perf_counter() - t, 2)
         timings[f"{channel}_no_speech"] = 1
         return [], {}
     res = Diarizer(
         DiarizerConfig(
-            num_speakers=cfg.num_speakers,
+            num_speakers=num_speakers,
             threshold=cfg.cluster_threshold,
-            merge_threshold=cfg.merge_threshold,
+            merge_threshold=cfg.merge_threshold if merge_threshold is None else merge_threshold,
             num_threads=cfg.num_threads,
-            label_offset=1,
+            label_offset=label_offset,
         ),
         embedder=embedder,
     ).diarize(audio)
-    timings["diarize"] = round(time.perf_counter() - t, 2)
+    timings[key] = round(time.perf_counter() - t, 2)
 
     chunks, speakers = [], {}
     for turn in res.turns:
@@ -148,17 +168,47 @@ def _system_branch(
     return chunks, speakers
 
 
-def _mic_branch(
-    mic: np.ndarray, sys: np.ndarray, cfg: PipelineConfig, vad: VadSegmenter, embedder: Embedder, timings: dict
-) -> tuple[list[tuple[str, AudioChunk]], dict[str, _Speaker]]:
-    t = time.perf_counter()
-    chunks, dropped = [], 0
+def _drop_mic_bleed(mic: np.ndarray, sys: np.ndarray, cfg: PipelineConfig, vad: VadSegmenter) -> tuple[list[AudioChunk], int]:
+    """Các đoạn nói trên Mic, đã bỏ đoạn chỉ là tiếng loa vọng vào."""
+    keep, dropped = [], 0
     for c in vad.segment(mic):
         a, b = int(c.start * SAMPLE_RATE), int(c.end * SAMPLE_RATE)
         if cfg.drop_bleed and _is_bleed(c.audio, sys[a:b]):
             dropped += 1
             continue
-        chunks.append((MIC_LABEL, c))
+        keep.append(c)
+    return keep, dropped
+
+
+def _room_mic_branch(
+    mic: np.ndarray, sys: np.ndarray, cfg: PipelineConfig, vad: VadSegmenter, embedder: Embedder, timings: dict
+) -> tuple[list[tuple[str, AudioChunk]], dict[str, _Speaker]]:
+    """Họp tại chỗ: tách nhiều người trên Mic, nhãn từ SPEAKER_00."""
+    t = time.perf_counter()
+    keep, dropped = _drop_mic_bleed(mic, sys, cfg, vad)
+    clean = np.zeros_like(mic)  # chỉ giữ đoạn nói thật, đoạn vọng -> im lặng
+    for c in keep:
+        a = int(c.start * SAMPLE_RATE)
+        clean[a : a + len(c.audio)] = c.audio
+    timings["mic_vad"] = round(time.perf_counter() - t, 2)
+    timings["mic_bleed_dropped"] = dropped
+    if not keep:
+        timings["mic_no_speech"] = 1
+        return [], {}
+    chunks, speakers = _system_branch(
+        clean, cfg, vad, embedder, "mic", timings, label_offset=0, merge_threshold=cfg.room_merge_threshold
+    )
+    for sp in speakers.values():
+        sp.audio = mic
+    return chunks, speakers
+
+
+def _mic_branch(
+    mic: np.ndarray, sys: np.ndarray, cfg: PipelineConfig, vad: VadSegmenter, embedder: Embedder, timings: dict
+) -> tuple[list[tuple[str, AudioChunk]], dict[str, _Speaker]]:
+    t = time.perf_counter()
+    keep, dropped = _drop_mic_bleed(mic, sys, cfg, vad)
+    chunks = [(MIC_LABEL, c) for c in keep]
     sp = _Speaker(MIC_LABEL, "mic", [(c.start, c.end) for _, c in chunks], audio=mic)
     sp.embedding, sp.duration = embedder.embed_segments(mic, sp.spans)
     timings["mic_vad"] = round(time.perf_counter() - t, 2)
@@ -253,12 +303,17 @@ def run_pipeline(
     cfg: PipelineConfig | None = None,
 ) -> PipelineResult:
     cfg = cfg or PipelineConfig()
+    if cfg.capture_mode not in CAPTURE_MODES:
+        raise ValueError(f"capture_mode phải là {CAPTURE_MODES}, nhận {cfg.capture_mode!r}")
+    if cfg.capture_mode == "room" and cfg.mic_name:
+        cfg = replace(cfg, mic_name=None)  # họp tại chỗ: không biết ai là chủ máy -> so khớp danh bạ
     timings: dict[str, float] = {}
     t0 = time.perf_counter()
 
     if channel == "auto":
         channel = "stereo" if probe_channels(audio_path) >= 2 else "mix"
     timings["mode"] = channel  # type: ignore[assignment]
+    timings["capture_mode"] = cfg.capture_mode  # type: ignore[assignment]
 
     vad = VadSegmenter(str(DEFAULT_VAD), max_speech_sec=cfg.max_segment_sec)
     embedder = Embedder(num_threads=cfg.num_threads)
@@ -266,14 +321,21 @@ def run_pipeline(
     if channel == "stereo":
         mic, sys = load_audio(audio_path, "left"), load_audio(audio_path, "right")
         timings["audio_sec"] = round(len(sys) / SAMPLE_RATE, 2)
-        chunks, speakers = _system_branch(sys, cfg, vad, embedder, "system", timings)
-        mic_chunks, mic_spk = _mic_branch(mic, sys, cfg, vad, embedder, timings)
-        chunks += mic_chunks
-        speakers.update(mic_spk)
+        if cfg.capture_mode == "room" and cfg.diarize:
+            chunks, speakers = _room_mic_branch(mic, sys, cfg, vad, embedder, timings)
+            offset = len(speakers)  # Loa đánh số tiếp sau người trên Mic
+        else:
+            chunks, speakers = _mic_branch(mic, sys, cfg, vad, embedder, timings)
+            offset = 1
+        sys_chunks, sys_spk = _system_branch(
+            sys, cfg, vad, embedder, "system", timings, label_offset=max(offset, 1), num_speakers=cfg.num_speakers
+        )
+        chunks += sys_chunks
+        speakers.update(sys_spk)
     else:
         audio = load_audio(audio_path, channel=channel)  # type: ignore[arg-type]
         timings["audio_sec"] = round(len(audio) / SAMPLE_RATE, 2)
-        chunks, speakers = _system_branch(audio, cfg, vad, embedder, "mono", timings)
+        chunks, speakers = _system_branch(audio, cfg, vad, embedder, "mono", timings, num_speakers=cfg.num_speakers)
 
     t = time.perf_counter()
     stt = create_transcriber(
@@ -330,6 +392,11 @@ def main() -> None:
     p.add_argument("--whisper-model", default="small", help="tiny/base/small/medium/large-v3-turbo")
     p.add_argument("--language", default="vi")
     p.add_argument("--no-diarize", action="store_true")
+    p.add_argument(
+        "--capture-mode", choices=CAPTURE_MODES, default="headset",
+        help="headset: họp online, Mic = 1 người | room: họp tại chỗ, tách nhiều người trên Mic",
+    )
+    p.add_argument("--room-merge-threshold", type=float, default=0.70, help="Ngưỡng gộp cụm trên Mic khi room")
     p.add_argument("--num-speakers", type=int, help="Số người ở Kênh Phải / file mono, nếu biết trước")
     p.add_argument("--threshold", type=float, default=0.5, help="Ngưỡng FastClustering (tầng 1)")
     p.add_argument("--merge-threshold", type=float, default=0.65, help="Cosine để gộp 2 cụm thành 1 người")
@@ -339,7 +406,7 @@ def main() -> None:
     p.add_argument("--no-punct", action="store_true", help="Không thêm dấu câu / viết hoa")
     p.add_argument("--voicebook", help="Danh bạ giọng (JSON) để gán tên thật, vd data/voicebook.json")
     p.add_argument("--match-threshold", type=float, default=DEFAULT_THRESHOLD)
-    p.add_argument("--mic-name", help="Tên người dùng Mic (Kênh Trái)")
+    p.add_argument("--mic-name", help="Tên người dùng Mic (Kênh Trái); bỏ qua khi --capture-mode room")
     p.add_argument("--keep-bleed", action="store_true", help="Không lọc tiếng loa vọng vào mic")
     p.add_argument("--db", help="DB SQLite của core_app (so khớp + tự học); thay cho --voicebook")
     p.add_argument("--no-learn", action="store_true", help="Có --db nhưng không ghi sample tự học")
@@ -352,6 +419,8 @@ def main() -> None:
         whisper_model=a.whisper_model,
         language=a.language,
         diarize=not a.no_diarize,
+        capture_mode=a.capture_mode,
+        room_merge_threshold=a.room_merge_threshold,
         num_speakers=a.num_speakers,
         cluster_threshold=a.threshold,
         merge_threshold=a.merge_threshold,
