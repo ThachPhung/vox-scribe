@@ -15,6 +15,8 @@ File mono: cả file đi theo nhánh Kênh Phải (SPEAKER_01, 02...).
 Chạy thử (từ thư mục services/backend):
     python -m speech_ai.pipeline_runner samples/meeting_vi.wav -o out.json
     python -m speech_ai.pipeline_runner samples/meeting_stereo.wav --voicebook data/voicebook.json --mic-name "Thạch"
+    # Dùng chung DB với core_app: so khớp từ voice_profiles + tự học sample mới
+    python -m speech_ai.pipeline_runner samples/meeting_stereo.wav --db data/voxscribe.db --meeting-id <id> --mic-name "Thạch"
 """
 from __future__ import annotations
 
@@ -56,12 +58,16 @@ class PipelineConfig:
     match_threshold: float = DEFAULT_THRESHOLD
     mic_name: str | None = None  # tên người dùng Mic (nếu biết), ưu tiên hơn so khớp danh bạ
     drop_bleed: bool = True
+    db_path: str | None = None  # DB SQLite của core_app; có thì dùng thay voicebook JSON
+    learn: bool = True  # tự học sample vào DB (chỉ khi có db_path)
+    learning_policy: "LearningPolicy | None" = None
 
 
 @dataclass
 class PipelineResult:
     transcript: dict
     timings: dict[str, float] = field(default_factory=dict)
+    learning: list = field(default_factory=list)  # list[LearnEvent]
 
 
 @dataclass
@@ -71,6 +77,7 @@ class _Speaker:
     spans: list[tuple[float, float]] = field(default_factory=list)
     embedding: np.ndarray | None = None
     duration: float = 0.0
+    audio: np.ndarray | None = None  # kênh chứa giọng người này (để tạo sample tự học)
 
 
 # ------------------------------------------------------------------ helpers
@@ -132,7 +139,7 @@ def _system_branch(
 
     chunks, speakers = [], {}
     for turn in res.turns:
-        sp = speakers.setdefault(turn.speaker, _Speaker(turn.speaker, channel))
+        sp = speakers.setdefault(turn.speaker, _Speaker(turn.speaker, channel, audio=audio))
         sp.spans.append((turn.start, turn.end))
         chunks += [(turn.speaker, c) for c in _split_long(audio, turn.start, turn.end, vad, cfg.max_segment_sec)]
     for lab, sp in speakers.items():
@@ -152,14 +159,14 @@ def _mic_branch(
             dropped += 1
             continue
         chunks.append((MIC_LABEL, c))
-    sp = _Speaker(MIC_LABEL, "mic", [(c.start, c.end) for _, c in chunks])
+    sp = _Speaker(MIC_LABEL, "mic", [(c.start, c.end) for _, c in chunks], audio=mic)
     sp.embedding, sp.duration = embedder.embed_segments(mic, sp.spans)
     timings["mic_vad"] = round(time.perf_counter() - t, 2)
     timings["mic_bleed_dropped"] = dropped
     return chunks, ({MIC_LABEL: sp} if chunks else {})
 
 
-def _identify(speakers: dict[str, _Speaker], cfg: PipelineConfig, embedder: Embedder) -> dict[str, dict]:
+def _identify(speakers: dict[str, _Speaker], cfg: PipelineConfig, embedder: Embedder, book=None) -> dict[str, dict]:
     """Gán tên thật cho từng SPEAKER_xx (Mic dùng --mic-name nếu có)."""
     info = {
         lab: {"speaker_id": None, "name": None, "score": None}
@@ -167,8 +174,10 @@ def _identify(speakers: dict[str, _Speaker], cfg: PipelineConfig, embedder: Embe
     }
     if cfg.mic_name and MIC_LABEL in info:
         info[MIC_LABEL]["name"] = cfg.mic_name
-    if cfg.voicebook:
-        matcher = SpeakerMatcher(JsonVoiceBook(cfg.voicebook), embedder.model_name, cfg.match_threshold)
+    if book is None and cfg.voicebook:
+        book = JsonVoiceBook(cfg.voicebook)
+    if book is not None:
+        matcher = SpeakerMatcher(book, embedder.model_name, cfg.match_threshold)
         cents = {
             lab: sp.embedding
             for lab, sp in speakers.items()
@@ -177,6 +186,23 @@ def _identify(speakers: dict[str, _Speaker], cfg: PipelineConfig, embedder: Embe
         for lab, m in matcher.match_clusters(cents).items():
             info[lab] = {"speaker_id": m.speaker_id, "name": m.name, "score": m.score}
     return info
+
+
+def _learn(meeting_id: str, speakers: dict[str, _Speaker], info: dict[str, dict], cfg: PipelineConfig, embedder: Embedder, book) -> list:
+    from .voice_learning import Candidate, LearningPolicy, VoiceLearner, make_samples
+
+    policy = cfg.learning_policy or LearningPolicy()
+    cands = []
+    for lab, sp in speakers.items():
+        if sp.embedding is None or sp.audio is None:
+            continue
+        hint = cfg.mic_name if lab == MIC_LABEL else None
+        sid = info[lab]["speaker_id"] if not hint else None
+        if sid is None and hint is None:
+            continue  # người lạ: không biết tên -> chờ /speakers/confirm
+        samples = make_samples(embedder, sp.audio, sp.spans, policy.sample_sec) if sp.duration >= policy.min_speech_sec else []
+        cands.append(Candidate(lab, sp.embedding, sp.duration, samples, sid, hint))
+    return VoiceLearner(book, embedder.model_name, policy).learn(meeting_id, cands)
 
 
 def _to_contract(
@@ -268,14 +294,27 @@ def run_pipeline(
         timings["punctuate"] = round(time.perf_counter() - t, 2)
 
     t = time.perf_counter()
-    info = _identify(speakers, cfg, embedder)
-    timings["identify"] = round(time.perf_counter() - t, 2)
+    meeting_id = meeting_id or Path(audio_path).stem
+    book, learning = None, []
+    if cfg.db_path:
+        from .voice_learning import SqliteVoiceBook
+
+        book = SqliteVoiceBook.open(cfg.db_path)
+    try:
+        info = _identify(speakers, cfg, embedder, book)
+        timings["identify"] = round(time.perf_counter() - t, 2)
+        if book is not None and cfg.learn:
+            t = time.perf_counter()
+            learning = _learn(meeting_id, speakers, info, cfg, embedder, book)
+            timings["learn"] = round(time.perf_counter() - t, 2)
+    finally:
+        if book is not None:
+            book.close()
 
     timings["total"] = round(time.perf_counter() - t0, 2)
     timings["rtf"] = round(timings["total"] / max(timings["audio_sec"], 1e-6), 3)  # < 1 là nhanh hơn thời gian thực
-    meeting_id = meeting_id or Path(audio_path).stem
     transcript = _to_contract(meeting_id, cfg.language, items, speakers, info, embedder.model_name, cfg.include_words)
-    return PipelineResult(transcript, timings)
+    return PipelineResult(transcript, timings, learning)
 
 
 def main() -> None:
@@ -302,6 +341,10 @@ def main() -> None:
     p.add_argument("--match-threshold", type=float, default=DEFAULT_THRESHOLD)
     p.add_argument("--mic-name", help="Tên người dùng Mic (Kênh Trái)")
     p.add_argument("--keep-bleed", action="store_true", help="Không lọc tiếng loa vọng vào mic")
+    p.add_argument("--db", help="DB SQLite của core_app (so khớp + tự học); thay cho --voicebook")
+    p.add_argument("--no-learn", action="store_true", help="Có --db nhưng không ghi sample tự học")
+    p.add_argument("--min-learn-sec", type=float, default=30.0, help="Ngưỡng sàn số giây nói để được tự học")
+    p.add_argument("--max-learn-samples", type=int, default=2, help="Số sample tự học tối đa / người / cuộc họp")
     a = p.parse_args()
 
     cfg = PipelineConfig(
@@ -320,7 +363,13 @@ def main() -> None:
         match_threshold=a.match_threshold,
         mic_name=a.mic_name,
         drop_bleed=not a.keep_bleed,
+        db_path=a.db,
+        learn=not a.no_learn,
     )
+    if a.db:
+        from .voice_learning import LearningPolicy
+
+        cfg.learning_policy = LearningPolicy(min_speech_sec=a.min_learn_sec, max_samples_per_meeting=a.max_learn_samples)
     res = run_pipeline(a.audio, a.meeting_id, a.channel, cfg)
 
     text = json.dumps(res.transcript, ensure_ascii=False, indent=2)
@@ -330,6 +379,8 @@ def main() -> None:
     else:
         print(text)
     print("Thời gian (giây):", res.timings)
+    for ev in res.learning:
+        print(f"Tự học {ev.label} ({ev.name or '?'}): {ev.action} - {ev.detail}")
 
 
 if __name__ == "__main__":

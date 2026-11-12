@@ -98,7 +98,37 @@ ALTER TABLE reports ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE reports ADD COLUMN transcript_revision INTEGER NOT NULL DEFAULT 0;
 """
 
-MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2}
+# v3: lưu từng sample vân tay giọng để speech_ai tự học (ghi thẳng) có kiểm soát.
+# voice_profiles.embedding = trung bình có trọng số của các sample 'active'.
+_SCHEMA_V3 = f"""
+CREATE TABLE voice_samples (
+    id            INTEGER PRIMARY KEY,
+    speaker_id    INTEGER NOT NULL REFERENCES speakers(id) ON DELETE CASCADE,
+    model_version TEXT NOT NULL,
+    embedding     BLOB NOT NULL CHECK (length(embedding) = {EMBEDDING_DIM * 4}),
+    duration_sec  REAL NOT NULL DEFAULT 0 CHECK (duration_sec >= 0),
+    source        TEXT NOT NULL CHECK (source IN ('auto', 'manual')),
+    status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspect')),
+    meeting_id    TEXT,
+    speaker_label TEXT,
+    match_score   REAL,
+    created_at    TEXT NOT NULL DEFAULT {SQL_NOW}
+);
+CREATE INDEX idx_voice_samples_speaker ON voice_samples(speaker_id, model_version, status);
+CREATE INDEX idx_voice_samples_meeting ON voice_samples(meeting_id, speaker_id);
+
+ALTER TABLE voice_profiles ADD COLUMN total_sec REAL NOT NULL DEFAULT 0;
+ALTER TABLE voice_profiles ADD COLUMN auto_learn TEXT NOT NULL DEFAULT 'on'
+    CHECK (auto_learn IN ('on', 'paused'));
+ALTER TABLE voice_profiles ADD COLUMN paused_reason TEXT;
+ALTER TABLE voice_profiles ADD COLUMN auto_meetings_since_check INTEGER NOT NULL DEFAULT 0;
+
+-- Vector cũ (từ /speakers/confirm) thành 1 sample 'manual'
+INSERT INTO voice_samples (speaker_id, model_version, embedding, source)
+    SELECT speaker_id, model_version, embedding, 'manual' FROM voice_profiles;
+"""
+
+MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 
