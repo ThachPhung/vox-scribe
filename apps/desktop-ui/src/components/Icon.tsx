@@ -16,7 +16,8 @@ export type IconName =
   | "file"
   | "clock"
   | "calendar"
-  | "wave";
+  | "wave"
+  | "download";
 
 const PATHS: Record<IconName, JSX.Element> = {
   mic: (
@@ -63,6 +64,7 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   x: <path d="M6 6l12 12M18 6 6 18" />,
+  download: <path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14" />,
   file: (
     <>
       <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" />

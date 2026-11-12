@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "../services/apiClient";
 import type { Meeting, Transcript } from "../types";
 import { fmtDateTime, fmtDuration } from "../utils";
+import AudioBar from "./AudioBar";
 import CopyButton from "./CopyButton";
 import Icon from "./Icon";
 import ReportEditor from "./ReportEditor";
@@ -58,17 +59,15 @@ export default function MeetingDetail({ meetingId, refreshKey = 0 }: Props) {
                 <Icon name={meeting.capture_mode === "headset" ? "headset" : "room"} size={14} />
                 {meeting.capture_mode === "headset" ? "Tai nghe" : "Phòng họp"}
               </span>
-              {meeting.audio_path && (
-                <span className="chip" title={meeting.audio_path}>
-                  <Icon name="wave" size={13} /> Đã lưu âm thanh
-                </span>
-              )}
               {meeting.status === "recording" && (
                 <span className="chip danger">
                   <span className="rec-dot" /> Đang ghi
                 </span>
               )}
             </div>
+          )}
+          {meeting?.audio_path && meeting.status !== "recording" && (
+            <AudioBar key={`${meeting.id}-${refreshKey}`} meetingId={meeting.id} title={meeting.title} />
           )}
         </div>
 

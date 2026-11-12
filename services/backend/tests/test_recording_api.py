@@ -119,3 +119,67 @@ def test_start_reports_device_error_and_does_not_leave_meeting_recording(client_
     assert response.status_code == 503
     assert "không mở được mic" in response.json()["detail"]
     assert all(m["status"] != "recording" for m in meetings)
+
+
+def _record_one(client: TestClient, title: str = "Họp 12/11 06:58") -> dict:
+    meeting = client.post("/recording/start", json={"title": title, "capture_mode": "headset"}).json()
+    return client.post(f"/recording/{meeting['id']}/stop").json()
+
+
+def test_audio_endpoint_returns_wav_named_after_meeting(client_factory):
+    with client_factory(FakeRecorder) as client:
+        meeting = _record_one(client)
+        response = client.get(f"/meetings/{meeting['id']}/audio")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/wav"
+    assert response.content == b"RIFF"
+    disposition = response.headers["content-disposition"]
+    assert "attachment" in disposition and "12-11%2006-58.wav" in disposition  # "/" và ":" bị thay
+
+
+def test_audio_endpoint_404_when_meeting_has_no_audio(client_factory):
+    with client_factory(FakeRecorder) as client:
+        meeting = _record_one(client)
+        Path(meeting["audio_path"]).unlink()
+        missing_file = client.get(f"/meetings/{meeting['id']}/audio")
+        unknown = client.get("/meetings/khong-co/audio")
+
+    assert missing_file.status_code == 404
+    assert unknown.status_code == 404
+
+
+def test_deleting_meeting_removes_its_audio_file(client_factory):
+    with client_factory(FakeRecorder) as client:
+        meeting = _record_one(client)
+        deleted = client.delete(f"/meetings/{meeting['id']}")
+
+    assert deleted.status_code == 204
+    assert not Path(meeting["audio_path"]).exists()
+
+
+def test_deleting_meeting_while_recording_stops_the_recorder(client_factory):
+    recorders: list[FakeRecorder] = []
+
+    def factory(path: Path) -> FakeRecorder:
+        recorders.append(FakeRecorder(path))
+        return recorders[-1]
+
+    with client_factory(factory) as client:
+        meeting = client.post("/recording/start", json={"title": "Họp", "capture_mode": "room"}).json()
+        client.delete(f"/meetings/{meeting['id']}")
+        restarted = client.post("/recording/start", json={"title": "Họp 2", "capture_mode": "room"})
+
+    assert recorders[0].stopped
+    assert not recorders[0].output_path.exists()
+    assert restarted.status_code == 201  # không còn kẹt "đang ghi"
+
+
+def test_meetings_left_recording_by_a_crash_are_closed_on_startup(client_factory):
+    with client_factory(FakeRecorder) as client:
+        meeting = client.post("/recording/start", json={"title": "Họp", "capture_mode": "room"}).json()
+    # Server tắt giữa chừng: lifespan dừng recorder nhưng dòng DB vẫn "recording".
+    with client_factory(FakeRecorder) as client:
+        after_restart = client.get(f"/meetings/{meeting['id']}").json()
+
+    assert after_restart["status"] == "recorded"
