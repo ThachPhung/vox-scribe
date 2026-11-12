@@ -83,6 +83,16 @@ def finish_recording(connection: sqlite3.Connection, meeting_id: str) -> Meeting
     return meeting
 
 
+def attach_audio(connection: sqlite3.Connection, meeting_id: str, audio_path: str, duration_sec: float) -> Meeting:
+    """Lưu file WAV của cuộc họp; thời lượng lấy theo âm thanh thật đã ghi."""
+    with write_transaction(connection):
+        connection.execute(
+            "UPDATE meetings SET audio_path = ?, duration_sec = ? WHERE id = ?",
+            (audio_path, duration_sec, meeting_id),
+        )
+    return get_meeting(connection, meeting_id)
+
+
 def save_transcript(connection: sqlite3.Connection, transcript: TranscriptIn) -> Transcript:
     """Thay toàn bộ transcript và tăng số phiên bản; biên bản tạo từ phiên bản cũ trở thành stale.
 

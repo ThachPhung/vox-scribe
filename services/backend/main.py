@@ -1,4 +1,5 @@
 """Điểm khởi chạy FastAPI Server."""
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Callable
@@ -16,9 +17,11 @@ from openai import OpenAI
 
 from core_app.api import routes_meetings, routes_recording, routes_speakers, websocket
 from core_app.api.dependencies import ALLOWED_ORIGINS, Services
-from core_app.api.websocket import EventHub
+from audio_engine.process_watcher import AppEvent, ProcessWatcher
+from core_app.api.websocket import AppDetectedData, AppDetectedEvent, EventHub, WsEvent
 from core_app.database.connection import initialize_database
 from core_app.database.repositories import ConflictError, NotFoundError
+from core_app.recording.session import RecordingSessions
 from core_app.llm_agent.summarizer import (
     EmptyTranscriptError,
     GenerationInProgressError,
@@ -34,6 +37,7 @@ HOST = "127.0.0.1"
 PORT = 8000
 ENV_FILE = Path(__file__).parent / ".env"
 DB_FILENAME = "voxscribe.db"
+RECORDINGS_DIRNAME = "recordings"
 DEFAULT_LLM_PROVIDER = "openai"
 DEFAULT_LLM_MODEL = "gpt-6-luna"
 DEFAULT_REASONING_EFFORT = "medium"
@@ -46,11 +50,13 @@ logger = logging.getLogger("voxscribe")
 
 def services_from_env() -> Services:
     """Đọc cấu hình từ biến môi trường (hoặc file .env) một lần khi server khởi động."""
+    data_dir = _data_dir_from_env()
     return Services(
-        db_path=_data_dir_from_env() / DB_FILENAME,
+        db_path=data_dir / DB_FILENAME,
         report_generator=_report_generator_from_env(),
         report_slots=ReportGenerationSlots(MAX_CONCURRENT_REPORTS),
         event_hub=EventHub(),
+        recordings=RecordingSessions(data_dir / RECORDINGS_DIRNAME, publish=lambda _event: None),
     )
 
 
@@ -95,7 +101,15 @@ def create_app(build_services: Callable[[], Services] = services_from_env) -> Fa
         services = build_services()
         initialize_database(services.db_path)
         app.state.services = services
-        yield
+        publish = _thread_publisher(services.event_hub, asyncio.get_running_loop())
+        services.recordings.set_publisher(publish)
+        watcher = _start_meeting_watcher(publish) if services.start_watcher else None
+        try:
+            yield
+        finally:
+            if watcher is not None:
+                watcher.stop()
+            services.recordings.stop_all()
 
     app = FastAPI(title="VoxScribe Backend", lifespan=lifespan)
     app.add_middleware(
@@ -115,6 +129,26 @@ def create_app(build_services: Callable[[], Services] = services_from_env) -> Fa
         return {"status": "ok"}
 
     return app
+
+
+def _thread_publisher(hub: EventHub, loop: asyncio.AbstractEventLoop) -> Callable[[WsEvent], None]:
+    """Cho thread nền (ghi âm, watcher) gửi sự kiện WebSocket qua event loop của server."""
+
+    def publish(event: WsEvent) -> None:
+        asyncio.run_coroutine_threadsafe(hub.broadcast(event), loop)
+
+    return publish
+
+
+def _start_meeting_watcher(publish: Callable[[WsEvent], None]) -> ProcessWatcher:
+    def on_event(event: AppEvent) -> None:
+        if event.running:
+            logger.info("Phát hiện %s đang mở", event.app)
+            publish(AppDetectedEvent(data=AppDetectedData(app=event.app)))
+
+    watcher = ProcessWatcher()
+    watcher.start(on_event)
+    return watcher
 
 
 def _error_handler(status_code: int) -> Callable[[Request, Exception], JSONResponse]:

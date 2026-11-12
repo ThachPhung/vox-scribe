@@ -16,6 +16,7 @@ from core_app.llm_agent.summarizer import ReportGenerationSlots, ReportGenerator
 
 if TYPE_CHECKING:
     from core_app.api.websocket import EventHub
+    from core_app.recording.session import RecordingSessions
 
 ALLOWED_ORIGINS = (
     "http://localhost:5173",
@@ -31,6 +32,8 @@ class Services:
     report_generator: ReportGenerator | None
     report_slots: ReportGenerationSlots
     event_hub: EventHub
+    recordings: RecordingSessions
+    start_watcher: bool = True
 
 
 def get_services(connection: HTTPConnection) -> Services:
@@ -57,6 +60,10 @@ def get_report_slots(services: Annotated[Services, Depends(get_services)]) -> Re
 
 def get_event_hub(services: Annotated[Services, Depends(get_services)]) -> EventHub:
     return services.event_hub
+
+
+def get_recordings(services: Annotated[Services, Depends(get_services)]) -> RecordingSessions:
+    return services.recordings
 
 
 Db = Annotated[sqlite3.Connection, Depends(get_db)]
