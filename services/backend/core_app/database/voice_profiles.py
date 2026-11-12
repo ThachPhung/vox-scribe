@@ -16,7 +16,8 @@ from core_app.database.models import EMBEDDING_DIM, SQL_NOW
 
 MANUAL_WEIGHT = 2.0  # sample người dùng xác nhận đáng tin hơn sample tự học
 MIN_WEIGHT_SEC = 10.0  # sample tự học tối thiểu tính 10s
-MANUAL_MIN_SEC = 30.0  # sample xác nhận tay (API không gửi số giây) tối thiểu tính 30s
+MANUAL_UNKNOWN_SEC = 30.0  # sample xác nhận tay không rõ số giây (hồ sơ có từ trước v3) tính như 30s
+MIN_CENTROID_NORM = 1e-6  # tổng nhỏ hơn mức này là các sample triệt tiêu nhau, không còn hồ sơ dùng được
 
 
 @dataclass
@@ -98,17 +99,20 @@ def weighted_centroid(samples: list[VoiceSample]) -> np.ndarray | None:
         return None
     w = np.array(
         [
-            max(s.duration_sec, MANUAL_MIN_SEC) * MANUAL_WEIGHT if s.source == "manual" else max(s.duration_sec, MIN_WEIGHT_SEC)
+            (s.duration_sec or MANUAL_UNKNOWN_SEC) * MANUAL_WEIGHT if s.source == "manual" else max(s.duration_sec, MIN_WEIGHT_SEC)
             for s in samples
         ],
         np.float32,
     )
     vecs = np.stack([_normalize(s.embedding) for s in samples])
-    return _normalize((vecs * w[:, None]).sum(0))
+    total = (vecs * w[:, None]).sum(0)
+    if float(np.linalg.norm(total)) < MIN_CENTROID_NORM:
+        return None
+    return _normalize(total)
 
 
 def recompute_profile(connection: sqlite3.Connection, speaker_id: int, model_version: str) -> np.ndarray | None:
-    """Tính lại vector hồ sơ từ các sample 'active'. Không còn sample nào thì xoá hồ sơ."""
+    """Tính lại vector hồ sơ từ các sample 'active'. Không còn sample nào dùng được thì xoá hồ sơ."""
     samples = list_samples(connection, speaker_id, model_version)
     centroid = weighted_centroid(samples)
     if centroid is None:

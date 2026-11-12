@@ -11,13 +11,15 @@ from typing import Literal, Protocol
 import openai
 from openai import OpenAI
 from openai.types.responses import ParsedResponse
+from pydantic import ValidationError
 
 from core_app.database.models import MeetingReport, Segment
 
-PROMPT_VERSION = "report-vi-v1"
+PROMPT_VERSION = "report-vi-v2"
 PROMPT_PATH = Path(__file__).parent / "prompts" / "report_vi.md"
 MAX_INPUT_TOKENS = 922_000
 LONG_CONTEXT_INPUT_TOKENS = 272_000
+MERGE_GAP_SEC = 30.0
 
 ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
 
@@ -45,6 +47,10 @@ class GenerationInProgressError(Exception):
     pass
 
 
+class GenerationCapacityError(Exception):
+    """Quá tải tạm thời: đã đủ số biên bản được tạo cùng lúc."""
+
+
 class ReportGenerationSlots:
     """Chặn tạo trùng biên bản cho cùng một cuộc họp và giới hạn số lần gọi LLM cùng lúc."""
 
@@ -59,7 +65,7 @@ class ReportGenerationSlots:
             if meeting_id in self._active:
                 raise GenerationInProgressError("Cuộc họp này đang được tạo biên bản, hãy chờ kết quả")
             if len(self._active) >= self._max_concurrent:
-                raise GenerationInProgressError("Đang tạo quá nhiều biên bản cùng lúc, hãy thử lại sau")
+                raise GenerationCapacityError("Đang tạo quá nhiều biên bản cùng lúc, hãy thử lại sau")
             self._active.add(meeting_id)
         try:
             yield
@@ -82,18 +88,25 @@ def format_timestamp(seconds: float) -> str:
 
 
 def build_transcript_lines(segments: list[Segment]) -> list[TranscriptLine]:
-    """Gộp các câu liền nhau của cùng một người, giữ mốc giờ của câu đầu."""
+    """Gộp câu liền nhau của cùng một người (nghỉ không quá MERGE_GAP_SEC), giữ mốc giờ của câu đầu.
+
+    Khoảng trắng và xuống dòng trong câu được gộp thành một dấu cách, để nội dung câu nói không giả
+    được thành một dòng "[HH:MM:SS] Tên: ..." mới.
+    """
     lines: list[TranscriptLine] = []
+    last_end = 0.0
     for segment in segments:
-        text = segment.text.strip()
+        text = " ".join(segment.text.split())
         if not text:
             continue
         speaker = segment.speaker_name or segment.speaker_label
-        if lines and lines[-1].speaker == speaker:
+        continues_turn = bool(lines) and lines[-1].speaker == speaker and segment.start_sec - last_end <= MERGE_GAP_SEC
+        if continues_turn:
             previous = lines[-1]
             lines[-1] = TranscriptLine(previous.timestamp, speaker, f"{previous.text} {text}")
         else:
             lines.append(TranscriptLine(format_timestamp(segment.start_sec), speaker, text))
+        last_end = segment.end_sec
     return lines
 
 
@@ -128,7 +141,7 @@ class OpenAIReportGenerator:
     def generate(self, transcript_text: str) -> MeetingReport:
         started = time.perf_counter()
         try:
-            input_tokens = self._count_input_tokens(transcript_text)
+            self._check_input_size(transcript_text)
             response = self._client.responses.parse(
                 model=self._settings.model,
                 instructions=self._instructions,
@@ -144,15 +157,23 @@ class OpenAIReportGenerator:
             raise ReportGenerationError(
                 f"OpenAI từ chối yêu cầu (mã {error.status_code})", retryable=False
             ) from error
+        except ValidationError as error:
+            raise ReportGenerationError(
+                "Biên bản model trả về bị cắt giữa chừng hoặc sai khuôn, chưa được lưu", retryable=False
+            ) from error
         logger.info(
-            "Tạo biên bản bằng %s: %d token vào, %.1f giây",
+            "Tạo biên bản bằng %s: %s token vào, %.1f giây",
             self._settings.model,
-            input_tokens,
+            response.usage.input_tokens if response.usage is not None else "không rõ",
             time.perf_counter() - started,
         )
         return _parsed_report(response)
 
-    def _count_input_tokens(self, transcript_text: str) -> int:
+    def _check_input_size(self, transcript_text: str) -> None:
+        """Chỉ gọi API đếm token khi transcript có thể vượt ngưỡng giá; số token không vượt số byte UTF-8."""
+        input_bytes = len(transcript_text.encode()) + len(self._instructions.encode())
+        if input_bytes <= LONG_CONTEXT_INPUT_TOKENS:
+            return
         input_tokens = self._client.responses.input_tokens.count(
             model=self._settings.model, instructions=self._instructions, input=transcript_text
         ).input_tokens
@@ -162,7 +183,6 @@ class OpenAIReportGenerator:
             )
         if input_tokens > LONG_CONTEXT_INPUT_TOKENS:
             logger.warning("Transcript %d token vượt %d: OpenAI tính giá cao hơn", input_tokens, LONG_CONTEXT_INPUT_TOKENS)
-        return input_tokens
 
 
 def _parsed_report(response: ParsedResponse[MeetingReport]) -> MeetingReport:

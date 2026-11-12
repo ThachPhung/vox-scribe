@@ -17,10 +17,11 @@ from openai import OpenAI
 from core_app.api import routes_meetings, routes_recording, routes_speakers, websocket
 from core_app.api.dependencies import ALLOWED_ORIGINS, Services
 from core_app.api.websocket import EventHub
-from core_app.database.connection import initialize_database
+from core_app.database.connection import DatabaseBusyError, initialize_database
 from core_app.database.repositories import ConflictError, NotFoundError
 from core_app.llm_agent.summarizer import (
     EmptyTranscriptError,
+    GenerationCapacityError,
     GenerationInProgressError,
     OpenAIReportGenerator,
     OpenAISettings,
@@ -36,7 +37,7 @@ ENV_FILE = Path(__file__).parent / ".env"
 DB_FILENAME = "voxscribe.db"
 DEFAULT_LLM_PROVIDER = "openai"
 DEFAULT_LLM_MODEL = "gpt-6-luna"
-DEFAULT_REASONING_EFFORT = "medium"
+DEFAULT_REASONING_EFFORT = "low"
 LLM_TIMEOUT_SEC = 120
 LLM_MAX_RETRIES = 1
 MAX_CONCURRENT_REPORTS = 2
@@ -107,6 +108,8 @@ def create_app(build_services: Callable[[], Services] = services_from_env) -> Fa
     app.add_exception_handler(ConflictError, _error_handler(status.HTTP_409_CONFLICT))
     app.add_exception_handler(EmptyTranscriptError, _error_handler(status.HTTP_409_CONFLICT))
     app.add_exception_handler(GenerationInProgressError, _error_handler(status.HTTP_409_CONFLICT))
+    app.add_exception_handler(GenerationCapacityError, _error_handler(status.HTTP_503_SERVICE_UNAVAILABLE))
+    app.add_exception_handler(DatabaseBusyError, _error_handler(status.HTTP_503_SERVICE_UNAVAILABLE))
     app.add_exception_handler(ReportGenerationError, _report_generation_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
 

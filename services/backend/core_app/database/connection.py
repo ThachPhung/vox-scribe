@@ -13,6 +13,10 @@ class SchemaVersionError(RuntimeError):
     pass
 
 
+class DatabaseBusyError(RuntimeError):
+    """Một request khác đang giữ khóa ghi quá thời gian chờ; gọi lại sau là được."""
+
+
 def open_connection(db_path: Path) -> sqlite3.Connection:
     """Mỗi request dùng một kết nối riêng; FastAPI có thể tạo và dùng nó ở hai luồng khác nhau."""
     connection = sqlite3.connect(db_path, check_same_thread=False)
@@ -27,7 +31,12 @@ def open_connection(db_path: Path) -> sqlite3.Connection:
 @contextmanager
 def write_transaction(connection: sqlite3.Connection) -> Iterator[None]:
     """Giữ khóa ghi từ lệnh đọc đầu tiên, để bước kiểm tra và bước ghi không bị request khác chen vào."""
-    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as error:
+        if "locked" not in str(error):
+            raise
+        raise DatabaseBusyError("Dữ liệu đang được ghi bởi thao tác khác, hãy thử lại sau giây lát") from error
     try:
         yield
     except BaseException:

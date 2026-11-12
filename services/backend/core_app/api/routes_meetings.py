@@ -1,18 +1,22 @@
 """API danh sách cuộc họp, transcript, nhãn người nói và biên bản."""
-from fastapi import APIRouter, HTTPException, status
+from enum import StrEnum
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from core_app.api.dependencies import Db, LlmReportGenerator, ReportSlots
 from core_app.database import repositories
 from core_app.database.models import (
     Meeting,
-    MeetingReport,
     MeetingSpeaker,
     Report,
     ReportDraft,
+    ReportEdit,
     ReportSource,
     Transcript,
     TranscriptIn,
 )
+from core_app.exporters.docx_exporter import build_minutes_docx
 from core_app.llm_agent.action_extractor import find_report_warnings
 from core_app.llm_agent.summarizer import PROMPT_VERSION, build_transcript_lines, summarize_meeting
 
@@ -82,24 +86,52 @@ def generate_report(
             llm_model=generator.model_name,
             prompt_version=PROMPT_VERSION,
         )
-        return repositories.save_report(db, draft, expected_revision=_revision_of(previous))
+        return repositories.save_generated_report(db, draft, expected_revision=_revision_of(previous))
 
 
 @router.put("/{meeting_id}/report")
-def save_edited_report(meeting_id: str, body: MeetingReport, db: Db) -> Report:
-    """Lưu biên bản người dùng sửa hoặc tự viết; giữ nguồn gốc của bản trước nếu có."""
+def save_edited_report(meeting_id: str, body: ReportEdit, db: Db) -> Report:
+    """Lưu biên bản người dùng sửa hoặc tự viết, theo đúng hai phiên bản họ đã đọc (409 nếu đã có bản mới hơn).
+
+    Biên bản giữ stale cho tới khi người dùng gửi transcript_revision mới nhất, tức đã đối chiếu lại.
+    """
     transcript = repositories.get_transcript(db, meeting_id)
     previous = repositories.find_report(db, meeting_id)
     draft = ReportDraft(
         meeting_id=meeting_id,
-        transcript_revision=transcript.revision,
-        content=body,
-        warnings=find_report_warnings(body, build_transcript_lines(transcript.segments)),
+        transcript_revision=body.transcript_revision,
+        content=body.content,
+        warnings=find_report_warnings(body.content, build_transcript_lines(transcript.segments)),
         source=previous.source if previous else ReportSource.MANUAL,
         llm_model=previous.llm_model if previous else None,
         prompt_version=previous.prompt_version if previous else None,
     )
-    return repositories.save_report(db, draft, expected_revision=_revision_of(previous))
+    return repositories.save_edited_report(db, draft, expected_revision=body.expected_revision)
+
+
+class ExportFormat(StrEnum):
+    DOCX = "docx"
+
+
+DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@router.get("/{meeting_id}/report/export", response_class=Response)
+def export_report(
+    meeting_id: str, db: Db, export_format: Annotated[ExportFormat, Query(alias="format")] = ExportFormat.DOCX
+) -> Response:
+    """Tải biên bản về máy; PDF và Markdown sẽ thêm vào ExportFormat ở bước sau."""
+    content = build_minutes_docx(
+        repositories.get_meeting(db, meeting_id),
+        repositories.get_report(db, meeting_id),
+        repositories.list_meeting_speakers(db, meeting_id),
+    )
+    filename = f"bien-ban-{meeting_id[:8]}.{export_format}"
+    return Response(
+        content,
+        media_type=DOCX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _revision_of(report: Report | None) -> int | None:

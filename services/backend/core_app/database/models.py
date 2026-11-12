@@ -1,12 +1,19 @@
 """Bảng SQLite và kiểu dữ liệu dùng chung: Meetings, Segments, Speakers, Jobs, Reports."""
 import unicodedata
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated
 
+import numpy as np
 from pydantic import AfterValidator, BaseModel, Field, FiniteFloat, model_validator
 
 EMBEDDING_DIM = 192
+MAX_SEGMENTS = 100_000
+MAX_SEGMENT_TEXT_CHARS = 10_000
+# Nhãn do bộ tách giọng đặt (SPEAKER_00, SPEAKER_UNKNOWN...). Không cho khoảng trắng hay ký tự điều khiển,
+# vì nhãn được in nguyên văn vào transcript gửi LLM và vào file Word.
+SPEAKER_LABEL_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 
 SQL_NOW = "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
 
@@ -128,7 +135,19 @@ INSERT INTO voice_samples (speaker_id, model_version, embedding, source)
     SELECT speaker_id, model_version, embedding, 'manual' FROM voice_profiles;
 """
 
-MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3}
+# v4: transcript kèm vector giọng của từng nhãn. Mỗi nhãn đã xác nhận có đúng một mẫu 'manual',
+# để sửa nhãn sang người khác thì gỡ được mẫu khỏi người cũ.
+_SCHEMA_V4 = f"""
+ALTER TABLE meeting_speakers ADD COLUMN channel TEXT CHECK (channel IN ('mic', 'system', 'mono'));
+ALTER TABLE meeting_speakers ADD COLUMN duration_sec REAL CHECK (duration_sec IS NULL OR duration_sec >= 0);
+ALTER TABLE meeting_speakers ADD COLUMN embedding BLOB
+    CHECK (embedding IS NULL OR length(embedding) = {EMBEDDING_DIM * 4});
+ALTER TABLE meeting_speakers ADD COLUMN embedding_model TEXT;
+CREATE UNIQUE INDEX uq_voice_samples_confirmation ON voice_samples(meeting_id, speaker_label)
+    WHERE source = 'manual' AND meeting_id IS NOT NULL;
+"""
+
+MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: _SCHEMA_V4}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 
@@ -139,7 +158,20 @@ def normalize_person_name(name: str) -> str:
     return normalized
 
 
+def require_usable_embedding(values: Sequence[float]) -> None:
+    """Vân tay giọng phải đủ số chiều và dùng được sau khi lưu dạng float32 (hữu hạn, khác vector 0)."""
+    if len(values) != EMBEDDING_DIM:
+        raise ValueError(f"Vector giọng có {len(values)} chiều, cần {EMBEDDING_DIM}")
+    with np.errstate(over="ignore"):
+        stored = np.asarray(values, dtype=np.float64).astype(np.float32)
+    if not np.all(np.isfinite(stored)):
+        raise ValueError("Vector giọng có giá trị NaN, vô cực hoặc vượt giới hạn float32")
+    if not np.any(stored):
+        raise ValueError("Vector giọng toàn số 0, không so khớp được")
+
+
 PersonName = Annotated[str, AfterValidator(normalize_person_name)]
+SpeakerLabel = Annotated[str, Field(pattern=SPEAKER_LABEL_PATTERN)]
 
 
 class MeetingStatus(StrEnum):
@@ -170,6 +202,17 @@ class JobStatus(StrEnum):
 class ReportSource(StrEnum):
     LLM = "llm"
     MANUAL = "manual"
+
+
+class AutoLearn(StrEnum):
+    ON = "on"
+    PAUSED = "paused"
+
+
+class SpeakerChannel(StrEnum):
+    MIC = "mic"
+    SYSTEM = "system"
+    MONO = "mono"
 
 
 class Meeting(BaseModel):
@@ -204,9 +247,9 @@ class TranscriptSegmentIn(BaseModel):
 
     start: FiniteFloat = Field(ge=0)
     end: FiniteFloat
-    speaker_label: str = Field(min_length=1)
+    speaker_label: SpeakerLabel
     speaker_name: str | None = None
-    text: str
+    text: str = Field(max_length=MAX_SEGMENT_TEXT_CHARS)
     words: list[Word] | None = None
 
     @model_validator(mode="after")
@@ -215,12 +258,39 @@ class TranscriptSegmentIn(BaseModel):
         return self
 
 
+class TranscriptSpeakerIn(BaseModel):
+    """Một người nói trong `speakers[]` của transcript_contract.json, kèm vân tay để enroll."""
+
+    label: SpeakerLabel
+    channel: SpeakerChannel
+    speaker_id: str | None = None
+    name: str | None
+    match_score: FiniteFloat | None = None
+    duration_sec: FiniteFloat | None = Field(default=None, ge=0)
+    embedding_model: str = Field(min_length=1)
+    embedding: list[FiniteFloat] | None
+
+    @model_validator(mode="after")
+    def _embedding_usable(self) -> "TranscriptSpeakerIn":
+        if self.embedding is not None:
+            require_usable_embedding(self.embedding)
+        return self
+
+
 class TranscriptIn(BaseModel):
-    """Transcript do speech_ai (TV2) trả về."""
+    """Transcript do speech_ai (TV2) trả về. `speakers` có thể vắng với transcript kiểu cũ."""
 
     meeting_id: str
     language: str | None = None
-    segments: list[TranscriptSegmentIn]
+    speakers: list[TranscriptSpeakerIn] = Field(default_factory=list)
+    segments: list[TranscriptSegmentIn] = Field(max_length=MAX_SEGMENTS)
+
+    @model_validator(mode="after")
+    def _speaker_labels_unique(self) -> "TranscriptIn":
+        labels = [speaker.label for speaker in self.speakers]
+        if len(labels) != len(set(labels)):
+            raise ValueError("speakers[] có nhãn bị lặp")
+        return self
 
 
 class Segment(BaseModel):
@@ -239,9 +309,20 @@ class Transcript(BaseModel):
     segments: list[Segment]
 
 
+class VoiceprintSummary(BaseModel):
+    model_version: str
+    total_sec: float
+    auto_learn: AutoLearn
+    paused_reason: str | None = Field(
+        description="Lý do speech_ai tạm dừng tự học giọng người này; xác nhận lại tên của họ để bật lại"
+    )
+    updated_at: datetime
+
+
 class Speaker(BaseModel):
     id: int
     name: str
+    voiceprints: list[VoiceprintSummary]
     created_at: datetime
     updated_at: datetime
 
@@ -250,53 +331,56 @@ class MeetingSpeaker(BaseModel):
     speaker_label: str
     speaker_id: int | None
     speaker_name: str | None
+    channel: SpeakerChannel | None
+    duration_sec: float | None
     match_score: float | None
+    has_meeting_embedding: bool = Field(description="Cuộc họp có vector giọng của nhãn này để enroll")
     confirmed_at: datetime | None
-
-
-class VoiceEmbedding(BaseModel):
-    values: list[FiniteFloat] = Field(min_length=EMBEDDING_DIM, max_length=EMBEDDING_DIM)
-    model_version: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _not_all_zero(self) -> "VoiceEmbedding":
-        if not any(self.values):
-            raise ValueError("Vector giọng toàn số 0, không so khớp được")
-        return self
-
-
-class SpeakerMatch(BaseModel):
-    speaker_id: int
-    name: str
-    similarity: float
 
 
 class SpeakerConfirmation(BaseModel):
     meeting_id: str
-    speaker_label: str
+    speaker_label: SpeakerLabel
     name: PersonName
-    embedding: VoiceEmbedding | None = None
+
+
+_EVIDENCE_AT = "Mốc HH:MM:SS của đúng dòng transcript làm bằng chứng, không kèm ngoặc vuông"
 
 
 class ReportItem(BaseModel):
-    content: str
-    evidence_at: str
+    content: str = Field(description="Một ý duy nhất, tiếng Việt có dấu, ngắn gọn")
+    evidence_at: str = Field(description=_EVIDENCE_AT)
 
 
 class ActionItem(BaseModel):
-    task: str
-    owner: str | None
-    deadline: str | None
-    evidence_at: str
+    task: str = Field(description="Việc cần làm, bắt đầu bằng động từ")
+    owner: str | None = Field(
+        description="Tên người được giao, viết đúng như trong transcript (kể cả nhãn SPEAKER_xx); "
+        "null nếu chưa ai nhận"
+    )
+    deadline: str | None = Field(description="Hạn hoàn thành giữ nguyên cách nói; null nếu không nêu")
+    evidence_at: str = Field(description=_EVIDENCE_AT)
 
 
 class MeetingReport(BaseModel):
-    """Biên bản 4 phần. Cũng là khuôn structured outputs gửi cho LLM."""
+    """Biên bản 4 phần. Cũng là khuôn structured outputs gửi cho LLM (mô tả trường đi kèm schema)."""
 
-    goals: list[ReportItem]
-    decisions: list[ReportItem]
-    open_issues: list[ReportItem]
-    action_items: list[ActionItem]
+    goals: list[ReportItem] = Field(description="Mục tiêu cuộc họp, mỗi mục tiêu một phần tử")
+    decisions: list[ReportItem] = Field(description="Quyết định cốt lõi đã được chốt rõ ràng")
+    open_issues: list[ReportItem] = Field(
+        description="Đề xuất, tranh luận hoặc câu hỏi chưa chốt; không lặp lại việc đã có trong action_items"
+    )
+    action_items: list[ActionItem] = Field(
+        description="Mọi việc cần làm, kể cả việc chưa có người nhận (owner null)"
+    )
+
+
+class ReportEdit(BaseModel):
+    """Bản biên bản người dùng gửi lên, kèm hai phiên bản họ đã đọc để không ghi đè bản mới hơn."""
+
+    content: MeetingReport
+    expected_revision: int | None = Field(description="revision của biên bản đã đọc; null nếu chưa có biên bản")
+    transcript_revision: int = Field(description="revision của transcript mà người dùng đã đối chiếu")
 
 
 class ReportDraft(BaseModel):

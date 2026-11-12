@@ -54,7 +54,7 @@ Xem `services/backend/.env.example`:
   - TV2 cần cài `-r requirements-offline.txt` để chạy pipeline sherpa-onnx.
 - **CORS** giờ chỉ cho phép `http://localhost:5173`, `http://127.0.0.1:5173`, `http://tauri.localhost` và `tauri://localhost`. Cần TV1 xác nhận origin của Tauri.
 - DB là file SQLite, được tạo hoặc nâng cấp lúc server khởi động.
-  - Schema hiện tại là v2.
+  - Schema hiện tại là v4 (v3 đến từ PR #7 của TV2, v4 là phần tuần 2 của TV3).
   - Mỗi bước nâng cấp chạy trọn trong một giao dịch: hoặc xong hết, hoặc không đổi gì.
   - Commit không chứa file DB (`*.db`) hay khóa API (`.env`).
 - Mọi lệnh ghi dùng `BEGIN IMMEDIATE`, để bước kiểm tra và bước ghi không bị request khác chen vào giữa.
@@ -62,6 +62,43 @@ Xem `services/backend/.env.example`:
   - Biên bản có `stale = true` khi transcript đã đổi sau lúc tạo.
   - `POST /report/generate` trả 409 khi đang tạo trùng, hoặc khi transcript hay biên bản bị đổi trong lúc chờ LLM.
 - Backend dùng Python 3.11.
+
+## Tuần 2 (commit sau PR #3)
+- **Schema v4** (tự nâng cấp khi server khởi động, chạy sau v3 của PR #7):
+  - `meeting_speakers` lưu channel, duration_sec, vector và model từ `speakers[]` của TV2.
+  - `voice_samples` (bảng của PR #7) không đổi cột, chỉ thêm index duy nhất `uq_voice_samples_confirmation`: mỗi nhãn đã xác nhận của một cuộc họp có đúng một mẫu `manual`.
+- **`PUT /meetings/{id}/transcript`** nhận contract mới có `speakers[]`. Transcript kiểu cũ vẫn nhận được.
+- **`POST /speakers/confirm`** chỉ nhận tên; trường `embedding` đã bỏ. Vector lấy từ `speakers[]` của transcript đã lưu.
+- **`GET /speakers`** trả kèm `voiceprints`. **`GET /meetings/{id}/speakers`** có thêm `channel`, `duration_sec`, `has_meeting_embedding`.
+- **Biên bản:** prompt `report-vi-v2`; khuôn structured outputs có mô tả cho từng trường.
+- **Xuất Word:** `GET /meetings/{id}/report/export?format=docx`, theo thể thức hành chính, kèm bảng phân công.
+- **Kiểm tra bằng tay:** nạp transcript → tạo hoặc sửa biên bản → mở `/docs`, gọi route export, tải file `.docx` về rồi mở bằng Word.
+
+## Tuần 2: thay đổi hành vi cần biết khi merge
+- **Nạp lại transcript thì bỏ các xác nhận tên cũ của cuộc họp đó, kể cả mẫu giọng `manual` đã học từ chúng.** Tên được gán lại theo `speakers[].name` của bộ so khớp; người dùng xác nhận lại thì mẫu được học lại.
+- **Xác nhận một tên mà bộ so khớp đã gán đúng** vẫn lưu mẫu giọng nhưng không làm biên bản thành stale.
+- **`GET /speakers`:** mỗi phần tử `voiceprints` có thêm `auto_learn` (`on` hoặc `paused`) và `paused_reason`, để giao diện nhắc người dùng xác nhận lại khi tự học bị tạm dừng.
+- **WebSocket:** client gửi không kịp trong 2 giây hoặc lỗi sẽ bị đóng với mã 1011. Giao diện cần tự nối lại khi nhận mã này.
+- **`POST /report/generate`:** biên bản bị cắt giữa chừng hoặc sai khuôn trả 502, không còn 500.
+- **`PUT /meetings/{id}/report`** nhận body mới: `{content, expected_revision, transcript_revision}`. Gửi bằng `revision` cũ thì nhận 409.
+- **Mã lỗi:** quá tải tạo biên bản hoặc DB bận trả 503. Tạo trùng hoặc dữ liệu đổi trong lúc chờ LLM trả 409.
+- **`LLM_REASONING_EFFORT`** mặc định là `low`.
+
+## Gộp với PR #7 của TV2 (tự học vân tay giọng)
+Nhánh này đã chứa các commit của PR #7 (`thachpv-dev`, tới `ba42188`) và sửa phần `core_app` cho khớp.
+- **Số schema:** v3 của PR #7 giữ nguyên văn. Phần của TV3 là v4, chạy sau v3.
+- **Một bảng mẫu giọng, một hàm tính hồ sơ:** `/speakers/confirm` ghi mẫu `manual` vào `voice_samples` của PR #7 rồi gọi `voice_profiles.recompute_profile` và `set_auto_learn`. Không còn hàm tính riêng trong `repositories.py`.
+- **Một `SqliteVoiceBook`:** chỉ còn lớp trong `speech_ai/voice_learning.py`. Lớp cùng tên trong `repositories.py` đã bỏ.
+- **Phần thay cho đoạn PR #7 sửa trong `repositories.py`:** `_save_voice_profile` và trường `embedding` của confirm không còn. Thay vào đó:
+  - Mẫu xác nhận tay gắn với (cuộc họp, nhãn). Sửa nhãn sang người khác thì mẫu chuyển theo và hồ sơ của cả hai người được tính lại.
+  - Sau khi nhãn được xác nhận là người Y, các mẫu `auto` **cùng giọng** trong cuộc họp đó (cosine từ 0.55 với vector của nhãn) được xử lý lại: của Y thì `active`, của người khác thì `suspect`. Tìm theo giọng chứ không theo nhãn, vì nhãn `SPEAKER_xx` đổi giữa các lần chạy pipeline. Dòng `suspect` được giữ để hạn mức mỗi cuộc họp vẫn tính.
+  - Xác nhận lại một người (kể cả khi nhãn đã xác nhận rồi) bật lại tự học cho người đó.
+- **DB đã lên v3 theo PR #7** nâng tiếp lên v4 bình thường.
+- **Thứ tự merge:** PR #7 đã merge vào `dev` (`fc63654`). Xung đột của nó với `dev` chỉ là hai dòng ví dụ lệnh `--db` trong chú thích đầu file `speech_ai/pipeline_runner.py`, đã giữ theo nhánh `thachpv-dev`. Nhánh này đã merge `dev` mới, nên PR chỉ còn phần `core_app` của TV3.
+- **TV3 đã sửa hai chỗ trong `core_app/database/voice_profiles.py` của PR #7** (TV2 xem giúp, cả hai đều nằm trong `weighted_centroid`):
+  - Mẫu `manual` tính theo số giây thật nhân 2. Mức 30 giây chỉ còn dùng khi không rõ số giây (hồ sơ có từ trước v3), vì confirm giờ lấy số giây từ transcript. Hằng số đổi tên từ `MANUAL_MIN_SEC` thành `MANUAL_UNKNOWN_SEC`.
+  - Khi các mẫu triệt tiêu nhau (tổng gần vector 0) hàm trả `None`, nên hồ sơ bị xóa thay vì lưu một vector toàn số 0.
+- **Gợi ý còn lại cho TV2** (TV3 không sửa `speech_ai`): `SqliteVoiceBook.upsert` tìm tên phân biệt hoa thường, trong khi `core_app` coi "nam" và "Nam" là một người.
 
 ## Ảnh hưởng tới thành viên khác
 - **TV1:**
@@ -72,4 +109,4 @@ Xem `services/backend/.env.example`:
   - TV3 đọc transcript theo contract hiện tại, có nhận thêm trường `words: [{word, start, end}]` nếu có.
   - `speaker_name` do bộ so khớp trả về chỉ được gán khi người đó đã có trong danh bạ.
   - Vector giọng gồm 192 số, lưu kèm `model_version`.
-  - `find_closest_speakers` trong `repositories.py` dùng được để so khớp.
+  - So khớp và tự học đi qua `speech_ai/voice_learning.py`; `repositories.py` không còn hàm so khớp.
