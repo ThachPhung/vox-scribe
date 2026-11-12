@@ -26,6 +26,7 @@ from .embedder import DEFAULT_MODEL, Embedder, l2_normalize
 
 DEFAULT_BOOK = Path(__file__).resolve().parents[1] / "data" / "voicebook.json"
 DEFAULT_THRESHOLD = 0.55  # CAM++: cùng người ~0.75-0.85, khác người ~0.2-0.45
+MIN_ENROLL_SPEECH_SEC = 3.0  # tổng số giây CÓ TIẾNG NÓI (sau VAD) tối thiểu để tạo vân tay
 
 
 @dataclass
@@ -139,7 +140,12 @@ class SpeakerMatcher:
         return result
 
     def enroll(self, name: str, embedding: np.ndarray, seconds: float, speaker_id: str | None = None) -> Voiceprint:
-        """Thêm người mới, hoặc cập nhật vân tay (trung bình có trọng số theo số giây) nếu đã có."""
+        """Thêm người mới, hoặc cập nhật vân tay (trung bình có trọng số theo số giây) nếu đã có.
+
+        `seconds` là số giây có tiếng nói đã dùng để tạo `embedding` (không tính khoảng lặng).
+        """
+        if not seconds > 0 or not np.all(np.isfinite(embedding)) or not np.any(embedding):
+            raise ValueError("Vân tay không hợp lệ: cần vector khác 0 và số giây tiếng nói > 0")
         existing = self.book.get(speaker_id) if speaker_id else None
         if existing is None and hasattr(self.book, "find_by_name"):
             existing = self.book.find_by_name(name, self.model)
@@ -155,22 +161,42 @@ class SpeakerMatcher:
 
 
 # ------------------------------------------------------------------ CLI
-def _embed_files(embedder: Embedder, files: list[str]) -> tuple[np.ndarray, float]:
+def _speech_only(audio: np.ndarray, vad) -> np.ndarray:
+    """Ghép các đoạn có tiếng nói (Silero VAD), bỏ khoảng lặng / tiếng ồn nền."""
+    chunks = vad.segment(audio)
+    return np.concatenate([c.audio for c in chunks]) if chunks else np.zeros(0, np.float32)
+
+
+def _make_vad():
+    from .audio_chunker import VadSegmenter
+    from .embedder import MODELS_DIR
+
+    return VadSegmenter(str(MODELS_DIR / "silero_vad.onnx"))
+
+
+def _embed_files(
+    embedder: Embedder, files: list[str], min_speech_sec: float = MIN_ENROLL_SPEECH_SEC
+) -> tuple[np.ndarray, float]:
+    """Vân tay từ nhiều file: chỉ dùng phần có tiếng nói; trả về (vector, số giây tiếng nói)."""
     from .audio_chunker import SAMPLE_RATE, load_audio
 
+    vad = _make_vad()
     vecs, secs = [], []
     for f in files:
-        a = load_audio(f)
-        v = embedder.embed(a)
+        speech = _speech_only(load_audio(f), vad)
+        v = embedder.embed(speech)
         if v is None:
-            print(f"  bỏ qua {f}: quá ngắn")
+            print(f"  bỏ qua {f}: không đủ tiếng nói ({len(speech) / SAMPLE_RATE:.1f}s)")
             continue
         vecs.append(v)
-        secs.append(len(a) / SAMPLE_RATE)
+        secs.append(len(speech) / SAMPLE_RATE)
+    total = float(sum(secs))
     if not vecs:
-        raise SystemExit("Không có file nào dùng được")
+        raise SystemExit("Không có file nào có tiếng nói")
+    if total < min_speech_sec:
+        raise SystemExit(f"Chỉ có {total:.1f}s tiếng nói, cần tối thiểu {min_speech_sec:.0f}s để đăng ký giọng")
     w = np.array(secs, np.float32)
-    return l2_normalize((np.stack(vecs) * w[:, None]).sum(0)), float(w.sum())
+    return l2_normalize((np.stack(vecs) * w[:, None]).sum(0)), total
 
 
 def main() -> None:
@@ -206,10 +232,11 @@ def main() -> None:
     elif a.cmd == "identify":
         from .audio_chunker import load_audio
 
+        vad = _make_vad()
         for f in a.files:
-            v = embedder.embed(load_audio(f))
+            v = embedder.embed(_speech_only(load_audio(f), vad))
             if v is None:
-                print(f"{f}: quá ngắn")
+                print(f"{f}: không có tiếng nói")
                 continue
             m = matcher.match(v)
             top = ", ".join(f"{vp.name}={s:.3f}" for vp, s in matcher.scores(v)[:3])
