@@ -63,6 +63,26 @@ tiếng Trung nên phần chữ của họ không có nghĩa; file này chỉ đ
 
 Chạy với file của bạn: thay đường dẫn `samples/...` bằng file `.wav` / `.mp3` / `.m4a` bất kỳ.
 
+### Chế độ ghi: họp online / họp tại chỗ
+
+Dùng chung giá trị với `capture_mode` của `POST /recording/start` (core_app):
+
+| `--capture-mode` | Khi nào | Kênh Mic | Kênh Loa |
+|---|---|---|---|
+| `headset` (mặc định) | Họp online, mỗi máy 1 người | 1 người: `SPEAKER_00` | `SPEAKER_01, 02...` |
+| `room` | Họp tại chỗ, nhiều người chung 1 mic | tách nhiều người: `SPEAKER_00..k-1` | đánh số tiếp: `SPEAKER_k...` |
+
+```bash
+python -m speech_ai.pipeline_runner ghi_am.wav --capture-mode room
+```
+
+- `room`: vẫn lọc tiếng loa vọng vào mic trước khi tách. Ngưỡng gộp trên Mic là `--room-merge-threshold`
+  (mặc định 0.70, chặt hơn Loa 0.65 vì giọng qua cùng 1 mic dễ giống nhau).
+- `room` bỏ qua `--mic-name` (không biết ai là chủ máy); tên lấy từ danh bạ / DB, tự học áp dụng cho
+  từng người tìm được trên Mic.
+- Đã thử `room` trên file biết trước số người (đặt lên kênh Mic): 1 người ×3, 2 người ×3, 4 người ×1 đều
+  đúng ở 0.70 (0.75 tách thừa 2/7 file).
+
 ### Tuỳ chọn
 
 - `--channel auto` (mặc định): file 2 kênh -> chế độ stereo, 1 kênh -> mono. Có thể ép `mix|left|right|stereo`.
