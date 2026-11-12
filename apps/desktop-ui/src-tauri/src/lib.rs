@@ -1,3 +1,5 @@
+mod recording_export;
+
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, WindowEvent};
@@ -7,6 +9,8 @@ const MAIN_WINDOW: &str = "main";
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())
+    .invoke_handler(tauri::generate_handler![recording_export::save_recording])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

@@ -1,4 +1,5 @@
-// Nghe lại và tải file ghi âm (WAV stereo: trái = mic, phải = loa) của một cuộc họp.
+// Nghe lại và lưu file ghi âm (WAV stereo: trái = mic, phải = loa) của một cuộc họp.
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useState } from "react";
 import { API_URL } from "../services/apiClient";
 import Icon from "./Icon";
@@ -6,6 +7,8 @@ import Icon from "./Icon";
 interface Props {
   meetingId: string;
   title: string;
+  /** Đường dẫn file WAV trên máy (backend lưu trong meetings.audio_path). */
+  audioPath: string;
 }
 
 /** Bỏ ký tự Windows không cho dùng trong tên file, giống backend. */
@@ -13,27 +16,40 @@ function safeFilename(title: string): string {
   return title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").replace(/^[ .]+|[ .]+$/g, "") || "cuoc-hop";
 }
 
-export default function AudioBar({ meetingId, title }: Props) {
+/** Trình duyệt thường: tải qua blob cùng origin (link thẳng sang :8000 bị bỏ qua thuộc tính download). */
+async function downloadInBrowser(src: string, filename: string): Promise<void> {
+  const res = await fetch(src);
+  if (!res.ok) throw new Error(res.status === 404 ? "Không còn file ghi âm" : `Lỗi ${res.status}`);
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+export default function AudioBar({ meetingId, title, audioPath }: Props) {
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const src = `${API_URL}/meetings/${meetingId}/audio`;
 
-  // Tải qua blob cùng origin: thẻ <a download> trỏ thẳng sang localhost:8000 (khác origin)
-  // sẽ bị bỏ qua thuộc tính download và mở file ngay trong cửa sổ app.
-  const download = async () => {
+  const save = async () => {
     setSaving(true);
-    setError(null);
+    setMessage(null);
     try {
-      const res = await fetch(src);
-      if (!res.ok) throw new Error(res.status === 404 ? "Không còn file ghi âm" : `Lỗi ${res.status}`);
-      const url = URL.createObjectURL(await res.blob());
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${safeFilename(title)}.wav`;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      if (isTauri()) {
+        // App desktop: WebView không tự tải file, nên mở hộp thoại "Lưu thành…" của Windows.
+        const saved = await invoke<string | null>("save_recording", {
+          source: audioPath,
+          suggestedName: safeFilename(title),
+        });
+        if (saved) setMessage({ kind: "ok", text: `Đã lưu: ${saved}` });
+      } else {
+        await downloadInBrowser(src, `${safeFilename(title)}.wav`);
+      }
     } catch (e) {
-      setError(`Không tải được: ${(e as Error).message}`);
+      const reason = e instanceof Error ? e.message : String(e);
+      setMessage({ kind: "error", text: `Không lưu được: ${reason}` });
     } finally {
       setSaving(false);
     }
@@ -42,11 +58,11 @@ export default function AudioBar({ meetingId, title }: Props) {
   return (
     <div className="audio-bar">
       <audio controls preload="metadata" src={src} aria-label="Nghe lại bản ghi" />
-      <button className="btn btn-sm" onClick={download} disabled={saving} title="Lưu file WAV về máy">
+      <button className="btn btn-sm" onClick={save} disabled={saving} title="Lưu file WAV về máy">
         <Icon name="download" size={14} />
-        {saving ? "Đang tải…" : "Tải âm thanh"}
+        {saving ? "Đang lưu…" : "Tải âm thanh"}
       </button>
-      {error && <span className="audio-error">{error}</span>}
+      {message && <span className={`audio-msg ${message.kind}`}>{message.text}</span>}
     </div>
   );
 }

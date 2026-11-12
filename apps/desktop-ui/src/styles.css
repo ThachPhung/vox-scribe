@@ -1347,7 +1347,12 @@ legend.field-label {
   border-radius: 999px;
 }
 
-.audio-error {
+.audio-msg {
   font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.audio-msg.error {
   color: var(--danger-text);
 }

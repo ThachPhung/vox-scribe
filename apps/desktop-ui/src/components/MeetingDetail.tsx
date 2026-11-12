@@ -67,7 +67,10 @@ export default function MeetingDetail({ meetingId, refreshKey = 0 }: Props) {
             </div>
           )}
           {meeting?.audio_path && meeting.status !== "recording" && (
-            <AudioBar key={`${meeting.id}-${refreshKey}`} meetingId={meeting.id} title={meeting.title} />
+            <AudioBar key={`${meeting.id}-${refreshKey}`} meetingId={meeting.id}
+              title={meeting.title}
+              audioPath={meeting.audio_path}
+            />
           )}
         </div>
 
