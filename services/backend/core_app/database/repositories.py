@@ -57,10 +57,12 @@ def get_meeting(connection: sqlite3.Connection, meeting_id: str) -> Meeting:
 
 
 def delete_meeting(connection: sqlite3.Connection, meeting_id: str) -> None:
+    """Xóa cuộc họp cùng mọi mẫu giọng học từ nó (xác nhận tay lẫn tự học), rồi tính lại hồ sơ liên quan."""
     with write_transaction(connection):
         deleted = connection.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,)).rowcount
         if deleted == 0:
             raise NotFoundError(f"Không tìm thấy cuộc họp {meeting_id}")
+        _forget_voice_samples(connection, _MEETING_SAMPLES, {"meeting_id": meeting_id})
 
 
 def finish_recording(connection: sqlite3.Connection, meeting_id: str) -> Meeting:
@@ -94,7 +96,7 @@ def save_transcript(connection: sqlite3.Connection, transcript: TranscriptIn) ->
         ).rowcount
         if bumped == 0:
             raise NotFoundError(f"Không tìm thấy cuộc họp {meeting_id}")
-        _forget_confirmed_voices(connection, meeting_id)
+        _forget_voice_samples(connection, _MEETING_CONFIRMED_SAMPLES, {"meeting_id": meeting_id})
         connection.execute("DELETE FROM segments WHERE meeting_id = ?", (meeting_id,))
         connection.execute("DELETE FROM meeting_speakers WHERE meeting_id = ?", (meeting_id,))
         connection.executemany(
@@ -154,15 +156,16 @@ def list_meeting_speakers(connection: sqlite3.Connection, meeting_id: str) -> li
 def confirm_speaker(connection: sqlite3.Connection, confirmation: SpeakerConfirmation) -> bool:
     """Gán tên thật cho một nhãn. Trả False khi xác nhận này đã được lưu trước đó.
 
-    Vector của nhãn thành mẫu 'manual' của người được xác nhận; sửa nhãn sang người khác thì mẫu chuyển theo.
-    Xác nhận cũng bật lại tự học của speech_ai cho người đó. transcript_revision chỉ tăng khi tên hiển thị
-    của nhãn đổi, để xác nhận một tên máy đã gán đúng không làm biên bản thành stale.
+    Vector của nhãn thành mẫu 'manual' của người được xác nhận; sửa nhãn sang người khác thì mẫu chuyển theo,
+    và tên cũ không còn dùng ở đâu (thường là gõ nhầm) bị bỏ khỏi danh bạ. Một mẫu tay mới cũng bật lại tự học
+    của speech_ai cho người đó. transcript_revision chỉ tăng khi tên hiển thị của nhãn đổi, để xác nhận một tên
+    máy đã gán đúng không làm biên bản thành stale.
     """
     label = (confirmation.meeting_id, confirmation.speaker_label)
     with write_transaction(connection):
         mapping = connection.execute(
-            "SELECT speaker_id, confirmed_at, embedding_model FROM meeting_speakers"
-            " WHERE meeting_id = ? AND speaker_label = ?",
+            "SELECT speaker_id, confirmed_at, embedding_model, embedding IS NOT NULL AS has_embedding"
+            " FROM meeting_speakers WHERE meeting_id = ? AND speaker_label = ?",
             label,
         ).fetchone()
         if mapping is None:
@@ -184,7 +187,9 @@ def confirm_speaker(connection: sqlite3.Connection, confirmation: SpeakerConfirm
                 "UPDATE meetings SET transcript_revision = transcript_revision + 1 WHERE id = ?",
                 (confirmation.meeting_id,),
             )
-        if mapping["embedding_model"] is not None:
+            if mapping["speaker_id"] is not None:
+                _delete_speaker_if_unused(connection, mapping["speaker_id"])
+        if newly_confirmed and mapping["has_embedding"]:
             voice_profiles.set_auto_learn(connection, speaker_id, mapping["embedding_model"], enabled=True)
     return newly_confirmed
 
@@ -331,6 +336,7 @@ def _meeting_speaker_rows(connection: sqlite3.Connection, transcript: Transcript
 
     Tên khớp được ưu tiên; speaker_id chỉ được dùng khi không có tên, vì id có thể đến từ danh bạ khác.
     """
+    known_speakers = _speaker_ids_by_name(connection)
     segment_names = _speaker_names_by_label(transcript.segments)
     details = {speaker.label: speaker for speaker in transcript.speakers}
     rows: list[dict[str, object]] = []
@@ -340,7 +346,7 @@ def _meeting_speaker_rows(connection: sqlite3.Connection, transcript: Transcript
         rows.append({
             "meeting_id": transcript.meeting_id,
             "label": label,
-            "speaker_id": _resolve_speaker_id(connection, name, speaker.speaker_id if speaker else None),
+            "speaker_id": _resolve_speaker_id(name, speaker.speaker_id if speaker else None, known_speakers),
             "match_score": speaker.match_score if speaker else None,
             "channel": speaker.channel if speaker else None,
             "duration_sec": speaker.duration_sec if speaker else None,
@@ -350,14 +356,12 @@ def _meeting_speaker_rows(connection: sqlite3.Connection, transcript: Transcript
     return rows
 
 
-def _resolve_speaker_id(connection: sqlite3.Connection, name: str | None, book_id: str | None) -> int | None:
+def _resolve_speaker_id(name: str | None, book_id: str | None, known_speakers: dict[str, int]) -> int | None:
+    """`known_speakers` là kết quả của _speaker_ids_by_name, đọc một lần cho cả transcript."""
     if name is not None:
-        return _find_speaker_id_by_name(connection, name)
+        return known_speakers.get(name.casefold())
     parsed = _parse_book_id(book_id)
-    if parsed is None:
-        return None
-    row = connection.execute("SELECT id FROM speakers WHERE id = ?", (parsed,)).fetchone()
-    return row["id"] if row is not None else None
+    return parsed if parsed in known_speakers.values() else None
 
 
 def _parse_book_id(value: str | None) -> int | None:
@@ -402,12 +406,25 @@ def _segment_from_row(row: sqlite3.Row) -> Segment:
 
 
 def _find_speaker_id_by_name(connection: sqlite3.Connection, name: str) -> int | None:
-    """So tên không phân biệt hoa thường; tên trong DB luôn đã chuẩn hóa NFC."""
-    wanted = name.casefold()
-    for row in connection.execute("SELECT id, name FROM speakers"):
-        if row["name"].casefold() == wanted:
-            return row["id"]
-    return None
+    return _speaker_ids_by_name(connection).get(name.casefold())
+
+
+def _speaker_ids_by_name(connection: sqlite3.Connection) -> dict[str, int]:
+    """Tên đã casefold → id, để so tên không phân biệt hoa thường; tên trong DB luôn đã chuẩn hóa NFC."""
+    return {row["name"].casefold(): row["id"] for row in connection.execute("SELECT id, name FROM speakers")}
+
+
+def _delete_speaker_if_unused(connection: sqlite3.Connection, speaker_id: int) -> None:
+    """Bỏ người không còn nhãn, mẫu giọng hay vân tay nào; người dùng không cần tự dọn tên gõ nhầm."""
+    connection.execute(
+        """
+        DELETE FROM speakers WHERE id = ?
+          AND NOT EXISTS (SELECT 1 FROM meeting_speakers WHERE speaker_id = speakers.id)
+          AND NOT EXISTS (SELECT 1 FROM voice_samples WHERE speaker_id = speakers.id)
+          AND NOT EXISTS (SELECT 1 FROM voice_profiles WHERE speaker_id = speakers.id)
+        """,
+        (speaker_id,),
+    )
 
 
 def _get_or_create_speaker(connection: sqlite3.Connection, name: str) -> int:
@@ -434,8 +451,10 @@ def _load_speakers(connection: sqlite3.Connection, where: str, params: tuple) ->
     return [Speaker.model_validate({**dict(row), "voiceprints": profiles.get(row["id"], [])}) for row in rows]
 
 
-# Cosine từ mức này trở lên coi là cùng một giọng; bằng ngưỡng nhận người DEFAULT_THRESHOLD của speech_ai.
-SAME_VOICE_MIN_SIMILARITY = 0.55
+# Cosine từ mức này trở lên coi là cùng một giọng. Cao hơn ngưỡng nhận người của speech_ai (0.55), vì kết quả
+# được dùng để cách ly hoặc khôi phục mẫu giọng của người khác; với CAM++, cùng người thường đạt 0.75-0.85.
+SAME_VOICE_MIN_SIMILARITY = 0.75
+_MEETING_SAMPLES = "meeting_id = :meeting_id"
 _MEETING_CONFIRMED_SAMPLES = "source = 'manual' AND meeting_id = :meeting_id"
 _CONFIRMED_SAMPLE = f"{_MEETING_CONFIRMED_SAMPLES} AND speaker_label = :speaker_label"
 _SAME_VOICE_AUTO_SAMPLE = """
@@ -456,6 +475,8 @@ def _move_voice_sample(
 
     Mẫu tự học được tìm theo độ giống giọng chứ không theo nhãn, vì nhãn SPEAKER_xx đổi giữa các lần chạy
     pipeline. Mẫu của người khác thành 'suspect' thay vì bị xóa, để hạn mức tự học của cuộc họp vẫn tính.
+    Mẫu cùng giọng của chính người được xác nhận trở lại 'active', kể cả khi bộ kiểm tra lệch đã cách ly nó:
+    người dùng vừa xác nhận giọng đó trong cuộc họp này, chắc chắn hơn phán đoán của máy.
     """
     params = {
         "meeting_id": confirmation.meeting_id,
@@ -485,11 +506,10 @@ def _move_voice_sample(
     _recompute_profiles(connection, affected)
 
 
-def _forget_confirmed_voices(connection: sqlite3.Connection, meeting_id: str) -> None:
-    """Bỏ các mẫu 'manual' học từ những xác nhận tên của cuộc họp, rồi tính lại hồ sơ của người có mẫu bị bỏ."""
-    params = {"meeting_id": meeting_id}
-    affected = _sample_owners(connection, _MEETING_CONFIRMED_SAMPLES, params)
-    connection.execute(f"DELETE FROM voice_samples WHERE {_MEETING_CONFIRMED_SAMPLES}", params)
+def _forget_voice_samples(connection: sqlite3.Connection, where: str, params: dict[str, object]) -> None:
+    """Xóa các mẫu khớp `where` (một mệnh đề cố định ở trên), rồi tính lại hồ sơ của người có mẫu bị xóa."""
+    affected = _sample_owners(connection, where, params)
+    connection.execute(f"DELETE FROM voice_samples WHERE {where}", params)
     _recompute_profiles(connection, affected)
 
 

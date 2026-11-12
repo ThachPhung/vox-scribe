@@ -11,6 +11,9 @@ from pydantic import AfterValidator, BaseModel, Field, FiniteFloat, model_valida
 EMBEDDING_DIM = 192
 MAX_SEGMENTS = 100_000
 MAX_SEGMENT_TEXT_CHARS = 10_000
+# Nhãn do bộ tách giọng đặt (SPEAKER_00, SPEAKER_UNKNOWN...). Không cho khoảng trắng hay ký tự điều khiển,
+# vì nhãn được in nguyên văn vào transcript gửi LLM và vào file Word.
+SPEAKER_LABEL_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 
 SQL_NOW = "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
 
@@ -168,6 +171,7 @@ def require_usable_embedding(values: Sequence[float]) -> None:
 
 
 PersonName = Annotated[str, AfterValidator(normalize_person_name)]
+SpeakerLabel = Annotated[str, Field(pattern=SPEAKER_LABEL_PATTERN)]
 
 
 class MeetingStatus(StrEnum):
@@ -243,7 +247,7 @@ class TranscriptSegmentIn(BaseModel):
 
     start: FiniteFloat = Field(ge=0)
     end: FiniteFloat
-    speaker_label: str = Field(min_length=1)
+    speaker_label: SpeakerLabel
     speaker_name: str | None = None
     text: str = Field(max_length=MAX_SEGMENT_TEXT_CHARS)
     words: list[Word] | None = None
@@ -257,7 +261,7 @@ class TranscriptSegmentIn(BaseModel):
 class TranscriptSpeakerIn(BaseModel):
     """Một người nói trong `speakers[]` của transcript_contract.json, kèm vân tay để enroll."""
 
-    label: str = Field(min_length=1)
+    label: SpeakerLabel
     channel: SpeakerChannel
     speaker_id: str | None = None
     name: str | None
@@ -336,7 +340,7 @@ class MeetingSpeaker(BaseModel):
 
 class SpeakerConfirmation(BaseModel):
     meeting_id: str
-    speaker_label: str
+    speaker_label: SpeakerLabel
     name: PersonName
 
 
